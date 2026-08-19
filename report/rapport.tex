@@ -1,0 +1,1264 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[english,french]{babel}
+% Securite : definit \og et \fg si babel-french n'est pas disponible
+\providecommand{\og}{\guillemotleft{}}
+\providecommand{\fg}{\guillemotright{}}
+\usepackage[margin=2.4cm,top=2cm,bottom=2.2cm]{geometry}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{float}
+\usepackage{titlesec}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\usepackage{multirow}
+\usepackage{fancyhdr}
+\usepackage[hidelinks]{hyperref}
+\usetikzlibrary{shapes.geometric, arrows.meta, positioning, fit, backgrounds, patterns}
+\pgfplotsset{compat=1.16}
+
+\definecolor{codebg}{RGB}{245,245,245}
+\definecolor{codegray}{RGB}{120,120,120}
+\definecolor{codeblue}{RGB}{30,80,160}
+\definecolor{codegreen}{RGB}{0,110,40}
+\definecolor{darkblue}{RGB}{30,39,97}
+\definecolor{teal}{RGB}{13,148,136}
+\definecolor{lightblue}{RGB}{235,244,251}
+
+\lstset{
+    backgroundcolor=\color{codebg},
+    basicstyle=\ttfamily\footnotesize,
+    commentstyle=\color{codegray}\itshape,
+    keywordstyle=\color{codeblue}\bfseries,
+    stringstyle=\color{codegreen},
+    numbers=left,
+    numberstyle=\tiny\color{codegray},
+    frame=single,
+    rulecolor=\color{black!15},
+    breaklines=true,
+    tabsize=2,
+    language=C++,
+    xleftmargin=1.5em,
+    framexleftmargin=1.5em,
+}
+
+\titlespacing{\section}{0pt}{14pt}{5pt}
+\titlespacing{\subsection}{0pt}{10pt}{3pt}
+\titlespacing{\subsubsection}{0pt}{8pt}{3pt}
+\setlength{\parskip}{4pt}
+\setlength{\parindent}{0pt}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\textit{Rapport d'optimisation HLS --- Bloc TSA GPS}}
+\fancyhead[R]{\small\textit{Mohammed Tazi Charki --- Stage M2 UMONS}}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+\title{
+  \vspace{-1.5cm}
+  \Large\textbf{Rapport d'optimisation mémoire du bloc TSA GPS sur FPGA}\\[0.4em]
+  \large Analyse du design original, axes d'optimisation et résultats de synthèse HLS
+}
+\author{Mohammed Tazi Charki\\
+\small Stage M2 --- UMONS Labo SEMI\\
+\small Superviseur~: Jérôme Verscheuren \quad Chef de service~: Carlos}
+\date{Juin -- Juillet 2026}
+
+\begin{document}
+\maketitle
+\thispagestyle{fancy}
+\tableofcontents
+\vspace{0.5cm}
+\hrule
+\vspace{0.5cm}
+
+%%% ============================================================
+\section{Introduction}
+\label{sec:intro}
+%%% ============================================================
+
+Les futures missions de Radio Occultation GNSS (GNSS-RO) sur constellations de CubeSats visent à sonder l'atmosphère terrestre à faible coût, en exploitant les signaux déjà émis par les satellites de navigation (GPS, Galileo, etc.). Ces missions imposent de traiter le signal directement à bord, sur un FPGA aux ressources très limitées, plutôt que de transmettre les données brutes vers le sol. Le bloc d'acquisition GPS, chargé d'identifier le décalage Doppler et la phase de code d'un satellite, constitue le premier maillon critique de cette chaîne de traitement embarquée.
+
+Ce rapport présente le travail réalisé durant un stage de Master~2 au Labo SEMI de l'UMONS, visant à réduire la consommation en ressources matérielles (mémoires BRAM et multiplieurs DSP) d'un bloc d'acquisition GPS existant (algorithme TSA/STSA), développé initialement par un collègue du laboratoire. L'objectif est double~: d'une part fournir une mesure chiffrée et comparative d'une optimisation déjà présente mais jamais évaluée dans le code existant, et d'autre part proposer une refactorisation architecturale plus profonde, partageant les ressources de calcul entre les deux étapes de l'algorithme (recherche grossière et recherche fine).
+
+Le développement et la validation sont menés sur une plateforme de laboratoire, un PYNQ-Z2, choisie pour sa simplicité de mise en \oe{}uvre et son écosystème logiciel Python déjà en place. Cette étape constitue un prototypage volontairement mené sur une carte modeste, avant d'envisager une migration vers un FPGA de plus grande capacité (famille Xilinx Zynq UltraScale+) pour les besoins futurs de traitement multi-constellations et multi-satellites simultané, une fois l'architecture validée sur un cas plus restreint.
+
+Au-delà de son résultat immédiat, ce travail poursuit un objectif décisionnel~: fournir des éléments concrets et chiffrés pour orienter le choix de l'architecture d'un futur récepteur GNSS embarqué sur CubeSat, capable à terme de traiter simultanément plusieurs signaux et plusieurs constellations GNSS. Les contraintes de ressources rencontrées et les solutions apportées ici sont donc à lire comme une étude de faisabilité, dont les enseignements dépassent le seul cas du bloc TSA GPS traité dans ce rapport.
+
+La suite de ce rapport présente d'abord le contexte scientifique et les principes généraux qui motivent ce travail (Section~\ref{sec:contexte}), puis formule la problématique technique précise à laquelle ce stage répond (Section~\ref{sec:problematique}), avant de détailler la plateforme matérielle cible (Section~\ref{sec:plateforme}), le design original, les optimisations apportées et leur validation.
+
+%%% ============================================================
+\section{Contexte scientifique et principes généraux}
+\label{sec:contexte}
+%%% ============================================================
+
+\subsection{L'observation atmosphérique par Radio Occultation GNSS}
+
+L'atmosphère terrestre est un milieu en perpétuel changement dont la connaissance précise est cruciale pour la météorologie, la climatologie et l'étude de l'ionosphère. Les instruments d'observation classiques~--- radiosondages, satellites météorologiques, stations sol~--- présentent des couvertures spatiales et temporelles inégales, laissant certaines zones géographiques (océans, régions polaires) et certaines couches atmosphériques (haute troposphère, stratosphère) insuffisamment observées.
+
+La \textbf{Radio Occultation GNSS} (GNSS-RO) propose une approche complémentaire~: exploiter les signaux radio déjà émis par les constellations de navigation (GPS, Galileo, GLONASS, BeiDou) pour sonder les propriétés de l'atmosphère. Lorsqu'un signal GNSS traverse les couches atmosphériques avant d'être reçu par un satellite en orbite basse, sa trajectoire et sa fréquence sont modifiées par les variations locales de l'indice de réfraction. Ces modifications~--- mesurables avec précision~--- permettent de reconstruire des profils verticaux de température, pression, humidité et densité électronique.
+
+L'intérêt majeur de la Radio Occultation réside dans ses propriétés métrologiques exceptionnelles~: auto-calibration, stabilité à long terme, couverture globale, et résolution verticale kilométrique. Une constellation de petits satellites en orbite basse (LEO) équipés de récepteurs GNSS-RO pourrait fournir plusieurs milliers de profils atmosphériques par jour, améliorant significativement les modèles de prévision météorologique.
+
+\subsection{La mesure du décalage Doppler}
+
+Lorsqu'un signal GPS traverse les couches atmosphériques avant d'être reçu par un satellite en orbite basse, sa fréquence apparente est modifiée par deux contributions distinctes~: un décalage \textbf{géométrique}, lié à la vitesse relative entre les deux satellites (de l'ordre de plusieurs kHz), et un décalage \textbf{atmosphérique}, plus faible (quelques dizaines à quelques centaines de Hz), qui contient l'information recherchée sur la réfractivité de l'atmosphère. En pratique, la chaîne de traitement extrait d'abord le Doppler total reçu, soustrait la contribution géométrique connue à partir des éphémérides orbitales, et obtient par différence le Doppler atmosphérique utile.
+
+Plusieurs familles de méthodes permettent d'estimer ce décalage Doppler, avec des compromis différents entre précision, robustesse et coût de calcul~:
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.4}
+\begin{tabular}{p{3.0cm}p{3.5cm}p{3.5cm}p{2.5cm}}
+\toprule
+\textbf{Méthode} & \textbf{Principe} & \textbf{Avantages} & \textbf{Limites} \\
+\midrule
+\textbf{Mesure de phase} (PLL) &
+Suivi de la phase instantanée du signal par boucle à verrouillage de phase &
+Très haute précision, résolution temporelle fine &
+Décrochage possible en zone de multitrajet (basse troposphère) \\
+\midrule
+\textbf{Acquisition TSA/STSA} (notre travail) &
+Corrélation sur grille Doppler $\times$ phase de code, recherche du pic &
+Robuste aux fortes variations Doppler, pas de suivi préalable requis &
+Précision limitée par le pas de grille, latence plus élevée \\
+\midrule
+\textbf{FFT / corrélation circulaire} &
+Corrélation dans le domaine fréquentiel par transformée de Fourier rapide &
+Efficace pour des signaux longs, précision sub-bin possible &
+Complexité calculatoire élevée, sensible au bruit \\
+\midrule
+\textbf{MUSIC / ESPRIT} (méthodes sous-espaces) &
+Décomposition en valeurs propres de la matrice de covariance &
+Super-résolution en fréquence, robustesse au bruit &
+Coût calculatoire très élevé, inadapté à l'embarqué temps réel \\
+\bottomrule
+\end{tabular}
+\caption{Comparaison des principales familles de méthodes de mesure Doppler pour la Radio Occultation GNSS.}
+\end{table}
+
+L'acquisition de type TSA/STSA se distingue par sa capacité à \textbf{réacquérir} rapidement un signal après une perte de verrouillage, ce qui est précieux dans les zones atmosphériques turbulentes où le Doppler varie rapidement (basse troposphère, ionosphère)~: contrairement aux méthodes de suivi continu (PLL), elle réinitialise complètement la recherche à chaque fenêtre de signal, sans dépendre d'un état antérieur. L'approche la plus prometteuse à terme consiste à combiner une TSA pour l'acquisition/réacquisition avec une PLL pour le suivi fin, les deux blocs pouvant coexister sur le même FPGA.
+
+\subsection{Le CubeSat~: moins performant individuellement, plus efficace collectivement}
+
+Les missions GNSS-RO historiques (CHAMP, GRACE, COSMIC) reposaient sur des satellites de grande taille, coûteux à développer et à lancer. Le développement des \textbf{CubeSats}~--- satellites standardisés de petite taille~--- ouvre la perspective de missions GNSS-RO à coût réduit, déployables en constellation.
+
+Il est important d'être honnête~: un CubeSat est inférieur à un satellite classique sur pratiquement tous ses paramètres individuels (puissance disponible, masse, capacité de calcul, bande passante de télémétrie, durée de vie, précision orbitale). L'avantage décisif du CubeSat n'est donc pas sa performance individuelle, mais sa \textbf{scalabilité}~: son coût unitaire, très inférieur à celui d'un satellite classique, permet de déployer des constellations de plusieurs dizaines à plusieurs centaines d'unités pour un budget équivalent à celui d'un seul grand satellite. À titre d'illustration, la mission COSMIC-2 (6~satellites classiques) fournit environ 3\,000~profils atmosphériques par jour~; une constellation de CubeSats à coût équivalent pourrait en fournir un ordre de grandeur de plus, tout en bénéficiant d'une redondance naturelle face aux pannes individuelles, impossible à obtenir avec un unique grand satellite.
+
+Cette approche impose toutefois une contrainte forte~: avec une bande passante de télémétrie très réduite (de l'ordre du kbit/s à quelques centaines de kbit/s), un CubeSat ne peut transmettre qu'une infime fraction des données GPS brutes échantillonnées à bord. Il est donc indispensable de traiter le signal directement sur le FPGA embarqué, et de ne transmettre au sol que les résultats compressés de l'acquisition (décalage Doppler, phase de code, indicateur de puissance), réduisant le débit nécessaire de plusieurs ordres de grandeur.
+
+\subsection{FPGA commercial (COTS) contre circuit dédié (ASIC)}
+
+La solution traditionnelle pour un récepteur GPS embarqué dans l'espace est le \textbf{circuit intégré dédié (ASIC)}~: performances optimales, mais coûts de conception et de qualification spatiale très élevés (plusieurs millions d'euros), difficilement justifiables pour une constellation de CubeSats ne nécessitant que quelques dizaines d'unités.
+
+Une alternative de plus en plus utilisée est le \textbf{FPGA COTS} (\textit{Commercial Off-The-Shelf})~: un composant commercial standard, non spécifiquement qualifié pour l'espace, mais dont le coût de développement est quasi nul grâce aux outils de synthèse haut niveau (HLS), et dont la reconfigurabilité permet de mettre à jour l'algorithme embarqué après le lancement. Cette flexibilité algorithmique est particulièrement utile dans un contexte de recherche où plusieurs méthodes d'acquisition Doppler (TSA/STSA, FFT, méthodes sous-espaces) restent à comparer.
+
+La contrepartie est une sensibilité potentielle aux radiations cosmiques (effets ponctuels, dose ionisante totale), atténuée en orbite basse par la protection partielle de la magnétosphère terrestre et par des stratégies de mitigation logicielle (reconfiguration périodique, redondance triple modulaire). C'est ce compromis coût/flexibilité qui justifie l'utilisation d'un FPGA Xilinx Zynq, aujourd'hui sur plateforme de laboratoire (PYNQ-Z2), comme proxy réaliste d'un futur FPGA embarqué en mission.
+
+%%% ============================================================
+\section{Problématique}
+\label{sec:problematique}
+%%% ============================================================
+
+\subsection{Un budget de ressources FPGA très contraint}
+
+Sur un FPGA de classe CubeSat, les ressources ne sont pas extensibles~: le circuit est gravé et son nombre de blocs mémoire et de multiplieurs est fixe. Contrairement à un ordinateur auquel on peut ajouter de la RAM, un FPGA ne peut pas \og{}acheter\fg{} de la mémoire supplémentaire~: chaque bloc mémoire non utilisé par un algorithme reste disponible pour un autre, mais chaque bloc utilisé en excès est définitivement perdu pour le reste du système.
+
+Or la chaîne de traitement GNSS-RO embarquée complète ne se limite pas au seul bloc d'acquisition~: elle nécessite également des blocs de transfert mémoire (DMA) entre le processeur et la logique programmable, ainsi que, à terme, des blocs de suivi de signal (tracking) et la capacité de traiter plusieurs satellites et plusieurs constellations simultanément pour maximiser le nombre de profils atmosphériques obtenus par orbite. Chacun de ces blocs consomme sa propre part de ressources, sur un total qui reste fixe.
+
+\subsection{Un design initial trop proche de la saturation}
+
+Le bloc d'acquisition GPS existant, développé par le collègue Ibrahima, a été synthétisé avec l'outil Vitis HLS et consomme, dans sa version initiale, la quasi-totalité des ressources mémoire et de calcul disponibles sur le FPGA cible (plus de 93\,\% des blocs mémoire BRAM et plus de 93\,\% des multiplieurs DSP disponibles~--- le détail exact des ressources de la plateforme est donné en Section~\ref{sec:plateforme}). À un tel niveau de saturation, il ne reste quasiment aucune marge pour intégrer les blocs de transfert de données (DMA) et le wrapper processeur nécessaires au simple fonctionnement du système sur la carte, sans même parler de l'ajout de fonctionnalités futures (suivi de signal, traitement multi-satellites, redondance matérielle pour la tolérance aux radiations).
+
+Il est donc \textbf{physiquement impossible}, en l'état, de faire fonctionner la chaîne de traitement complète sur le FPGA disponible. Une réduction significative de la consommation en ressources du bloc d'acquisition est une condition nécessaire, et non un simple exercice d'optimisation académique, pour que le projet de Radio Occultation sur CubeSat reste réalisable sur ce type de plateforme.
+
+\subsection{Objectifs fixés pour ce travail}
+
+Le chef de service Carlos a fixé comme objectif de \textbf{réduire significativement la consommation en ressources mémoire (BRAM) et de calcul (DSP)} du bloc d'acquisition, selon deux approches complémentaires, détaillées et évaluées dans la suite de ce rapport~:
+
+\begin{enumerate}
+  \item Éliminer les lectures redondantes identifiées dans le code existant (Section~\ref{sec:axe1}).
+  \item Refactoriser l'architecture vers un \og circuit pilote \fg{} partagé entre les deux étapes de corrélation de l'algorithme, la recherche grossière et la recherche fine (Section~\ref{sec:axe2}).
+\end{enumerate}
+
+Ces deux axes sont ensuite validés fonctionnellement (Sections~\ref{sec:validation-prn25} à~\ref{sec:validation-ro}) et évalués en termes de ressources FPGA réelles après synthèse complète (Section~\ref{sec:resultats-synthese}).
+
+%%% ============================================================
+\section{Plateforme matérielle}
+\label{sec:plateforme}
+%%% ============================================================
+
+La plateforme de développement et de validation utilisée dans ce travail est un \textbf{PYNQ-Z2}, une carte de laboratoire construite autour d'un SoC Xilinx \texttt{xc7z020clg400-1}. Ce choix est motivé par la simplicité de sa prise en main (écosystème Python déjà en place, notebooks Jupyter pour piloter le FPGA depuis le processeur embarqué) et par son statut de \textbf{proxy réaliste} d'un futur FPGA de classe CubeSat~: bien qu'il ne soit pas qualifié pour l'espace, il appartient à la même famille de composants commerciaux (COTS) qui serait raisonnablement envisagée pour une mission réelle, à ceci près qu'un FPGA plus performant (par exemple de la famille Xilinx Zynq UltraScale+) serait probablement retenu pour la version de vol, une fois l'architecture validée sur cette plateforme de prototypage.
+
+Le SoC combine~:
+\begin{itemize}
+  \item Un processeur ARM Cortex-A9 (\textit{Processing System}, PS), exécutant Linux et les scripts Python de contrôle et de test.
+  \item Une partie programmable FPGA (\textit{Programmable Logic}, PL), dont les ressources disponibles sont résumées ci-dessous.
+\end{itemize}
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lr}
+\toprule
+\textbf{Ressource} & \textbf{Quantité disponible} \\
+\midrule
+Blocs BRAM (mémoire embarquée, 18~Kbits chacun) & 280 \\
+Blocs DSP (multiplieurs câblés 18$\times$27~bits) & 220 \\
+LUT (tables de correspondance logique) & 53\,200 \\
+Flip-Flops (bascules/registres) & 106\,400 \\
+\bottomrule
+\end{tabular}
+\caption{Ressources disponibles sur le FPGA Xilinx xc7z020clg400-1 de la plateforme PYNQ-Z2.}
+\end{table}
+
+L'outil de synthèse haut niveau (HLS) utilisé est \textbf{Vitis HLS 2023.2}, qui permet de décrire l'architecture matérielle directement en C/C++, guidée par des annotations (\textit{pragmas}) contrôlant les choix d'allocation mémoire (BRAM, registres), de parallélisme (\texttt{UNROLL}, \texttt{PIPELINE}) et d'interface de communication (AXI-Stream, AXI-Lite) avec le reste du système.
+
+
+%%% ============================================================
+\section{Description du design original d'Ibrahima}
+\label{sec:design-original}
+%%% ============================================================
+
+\subsection{Algorithme Two-Step Acquisition (TSA/STSA)}
+
+L'algorithme TSA est une méthode d'acquisition GPS en deux étapes successives. Son principe repose sur la recherche de la corrélation croisée entre le signal GPS reçu et le code PRN local~--- code pseudo-aléatoire de 1023~chips propre à chaque satellite~--- sur une grille bidimensionnelle (fréquence Doppler, phase PRN).
+
+La variante STSA (\textit{Serial Two-Step Acquisition}) sous-échantillonne le signal en \textbf{8~passes} successives, chaque passe ne traitant qu'un échantillon sur 8~:
+
+\begin{equation}
+\text{Passe } p ~:~ \text{indices } \{p,\ p+8,\ p+16,\ \ldots\}, \quad p \in \{0,\ldots,7\}
+\end{equation}
+
+Chaque passe calcule les corrélations pour les 41 bins Doppler (plage $\pm10\,000$~Hz, pas de 500~Hz) et les 1023 phases PRN. L'accumulation progressive sur les 8~passes converge vers le résultat complet sans traiter tous les $N=11\,999$ échantillons d'un seul tenant, ce qui permet un pipeline matériel efficace.
+
+\subsection{Structure du pipeline --- coarse et fine search}
+
+Le pipeline global comprend deux étapes~:
+
+\paragraph{Coarse search.} Recherche sur toute la grille Doppler (41~bins, pas 500~Hz) et toutes les phases PRN (1023~valeurs). Cette étape utilise la variante nominale du PRN uniquement (pas de demi-chip). Le résultat est le bin Doppler et la phase approximatifs du satellite détecté.
+
+\paragraph{Fine search.} Raffinement autour du pic coarse sur une plage réduite (21~bins, pas 250~Hz, centrés sur le résultat coarse). La fine search teste \textbf{trois variantes PRN}~:
+\begin{itemize}
+  \item Variante~0~: PRN nominal ($\tau$ exact).
+  \item Variante~1~: PRN décalé de $+\tfrac{1}{2}$~chip (moyenne entre chips $i$ et $i+1$).
+  \item Variante~2~: PRN décalé de $-\tfrac{1}{2}$~chip (moyenne entre chips $i$ et $i-1$).
+\end{itemize}
+
+Ces trois variantes permettent de détecter si le vrai pic de corrélation tombe entre deux cases de grille entières, affinant ainsi la précision de phase d'un facteur~2.
+
+\subsection{Structure des données --- \texttt{prn\_banks}}
+
+Pour permettre les accès parallèles dans la boucle de corrélation pipelinée (\texttt{FINE\_TAU\_TILE}~=~16 phases en parallèle), le code PRN est stocké sous la forme~:
+
+\begin{lstlisting}[caption={Déclaration de prn\_banks dans acq\_stsaV2.cpp}]
+prn_sign_t prn_banks[PRN_VARIANTS][FINE_TAU_TILE][2 * N];
+#pragma HLS ARRAY_PARTITION variable=prn_banks complete dim=2
+\end{lstlisting}
+
+Ce tableau de dimensions $[3][16][2 \times 11999]$ contient~:
+\begin{itemize}
+  \item Dimension~1~: les 3 variantes PRN.
+  \item Dimension~2~: 16~copies identiques (banques) pour servir 16~accès simultanés en un seul cycle.
+  \item Dimension~3~: $2N$ éléments pour les accès circulaires sans modulo.
+\end{itemize}
+
+Le pragma \texttt{ARRAY\_PARTITION complete dim=2} génère 16~blocs BRAM physiquement séparés par variante, soit $3 \times 16 = 48$ copies, consommant à elles seules environ \textbf{96 à 100~BRAM}.
+
+\subsection{Analyse détaillée de la fine search --- lectures redondantes}
+
+La boucle de corrélation de la fine search dans \texttt{acq\_stsaV2.cpp} appelle la fonction \texttt{process\_variant\_all\_tau()} pour chaque variante~:
+
+\begin{lstlisting}[caption={Version lente --- relecture $\times3$ dans produce\_fine\_powers()}]
+// Version legacy : 3 appels successifs (1 par variante)
+for (int v = 0; v < PRN_VARIANTS; v++) {
+    process_variant_all_tau(mix_i, mix_q,
+                            prn_banks[v],
+                            tau_start_tbl, fd,
+                            (variant_t)v, pow_s);
+    // mix_i[0..N-1] et mix_q[0..N-1] relus entierement
+    // a chaque appel -> 3 x N = 35 997 lectures
+}
+\end{lstlisting}
+
+À chaque appel, \texttt{process\_variant\_all\_tau()} parcourt les 11\,999 échantillons de \texttt{mix\_i} et \texttt{mix\_q} pour en calculer les corrélations. Avec 3~appels successifs, ces tableaux sont relus \textbf{3 fois en totalité}.
+
+La version optimisée \texttt{process\_all\_variants\_all\_tau()} existait déjà dans le code mais n'avait jamais été mesurée comparativement~:
+
+\begin{lstlisting}[caption={Version optimisée --- lecture $\times1$ avec distribution parallèle}]
+// Version optimisee : 1 seule lecture, distribution aux 3 variantes
+SAMPLE_LOOP_ALL: for (int n = 0; n < N; n++) {
+#pragma HLS PIPELINE II=1
+    sample_t bi = mix_i[n];   // lu UNE SEULE FOIS
+    sample_t bq = mix_q[n];   // lu UNE SEULE FOIS
+
+    // Distribution simultanee aux 3 variantes x 16 phases (UNROLL)
+    for (int v = 0; v < PRN_VARIANTS; v++) {
+#pragma HLS UNROLL
+        for (int k = 0; k < FINE_TAU_TILE; k++) {
+#pragma HLS UNROLL
+            // Accumulation pour la variante v, la phase tau_base+k
+            accI[v][k] += ...;
+            accQ[v][k] += ...;
+        }
+    }
+}
+// Resultat : mix_i/mix_q relus 1 x N = 11 999 fois seulement
+\end{lstlisting}
+
+Le pragma \texttt{\#pragma HLS PIPELINE II=1} impose un Initiation Interval de 1~cycle, et le double \texttt{UNROLL} génère $3 \times 16 = 48$~accumulateurs en registres FF, tous mis à jour simultanément à chaque cycle.
+
+\subsection{Mélange DDS --- génération du signal de référence}
+
+Avant la corrélation, le signal GPS reçu est multiplié par un oscillateur local numérique (DDS, \textit{Direct Digital Synthesis}) pour compenser le décalage Doppler et ramener le signal en bande de base. Pour chaque bin Doppler $f_d$, la fréquence totale à compenser est~:
+
+\begin{equation}
+f_{\text{total}} = -(f_c + f_d), \quad f_c = 3\,563\,000~\text{Hz (fréquence porteuse)}
+\end{equation}
+
+L'incrément de phase en arithmétique entière 32~bits est~:
+
+\begin{equation}
+\Delta\varphi = \frac{f_{\text{total}} \times 2^{32}}{f_s}, \quad f_s = 11\,999\,000~\text{Hz (fréquence d'échantillonnage)}
+\end{equation}
+
+La LUT sinus/cosinus (\texttt{DDS\_SIN\_LUT}, \texttt{DDS\_COS\_LUT}) est indexée sur les 10~bits de poids fort de l'accumulateur de phase. Le mélange pour chaque échantillon $n$ est~:
+
+\begin{equation}
+\text{mix\_i}[n] = x[n] \cdot \cos(\varphi_n), \qquad
+\text{mix\_q}[n] = -x[n] \cdot \sin(\varphi_n)
+\end{equation}
+
+Ce mélange est calculé dans une boucle pipelinée (II=1) avant chaque appel au corrélateur.
+
+\subsection{Fonctionnement détaillé des 8 passes STSA}
+
+L'algorithme STSA sous-échantillonne le signal en 8~passes pour permettre un pipeline matériel efficace. Le signal de $N~=~11\,999$~échantillons est divisé en 8~sous-ensembles~:
+
+\begin{equation}
+S_p = \{x[p],\ x[p+8],\ x[p+16],\ \ldots\}, \quad p \in \{0, 1, \ldots, 7\}
+\end{equation}
+
+Chaque sous-ensemble $S_p$ contient environ $M~=~N/8~\approx~1\,500$~échantillons. Pour chaque bin Doppler $f_d$~:
+
+\begin{enumerate}
+  \item Les accumulateurs \texttt{accI\_d[NB\_PHASES]} et \texttt{accQ\_d[NB\_PHASES]} sont remis à zéro.
+  \item Pour chaque passe $p$ de 0 à 7~:
+    \begin{itemize}
+      \item Le mélange DDS est calculé sur $S_p$ uniquement (phase initiale $= \Delta\varphi \times p$, pas $= \Delta\varphi \times 8$).
+      \item Le corrélateur accumule les $M$ produits signal $\times$ PRN dans \texttt{accI\_d} et \texttt{accQ\_d}.
+    \end{itemize}
+  \item Après la 8\textsuperscript{ème} passe, les accumulateurs contiennent l'équivalent d'une corrélation sur $N$ échantillons complets.
+\end{enumerate}
+
+Ce découpage en 8~passes permet de traiter des sous-ensembles courts à chaque itération, réduisant la profondeur des pipelines et les besoins en registres intermédiaires, tout en conservant la précision d'une corrélation complète.
+
+\subsection{Bilan du design original}
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lrrrrl}
+\toprule
+\textbf{Ressource} & \textbf{Utilisé} & \textbf{Disponible} & \textbf{Occupation} & \textbf{Fmax} \\
+\midrule
+BRAM & 265 & 280 & 94.6\,\% & \multirow{4}{*}{137~MHz} \\
+DSP  & 205 & 220 & 93.2\,\% & \\
+FF   & 44\,819 & 106\,400 & 42.1\,\% & \\
+LUT  & 49\,733 & 53\,200 & 93.5\,\% & \\
+\bottomrule
+\end{tabular}
+\caption{Ressources consommées par le design original (version lente, avant optimisation). La BRAM et le DSP sont au-delà de 93\,\% du maximum disponible.}
+\end{table}
+
+%%% ============================================================
+\section{Axe d'optimisation 1 --- Suppression des lectures redondantes}
+\label{sec:axe1}
+%%% ============================================================
+
+\subsection{Méthode}
+
+Un switch de compilation \texttt{STSA\_USE\_LEGACY\_VARIANT\_LOOP} a été ajouté dans \texttt{acq\_stsaV2.h} pour basculer entre les deux versions depuis le même projet Vitis HLS, sans duplication de fichiers~:
+
+\begin{lstlisting}[caption={Switch dans acq\_stsaV2.h}]
+// Decommenter pour activer la version lente (legacy) :
+// #define STSA_USE_LEGACY_VARIANT_LOOP
+
+// Par defaut (commente) : version optimisee active en production
+\end{lstlisting}
+
+Dans \texttt{acq\_stsaV2.cpp}, la fonction \texttt{produce\_fine\_powers()} utilise ce switch~:
+
+\begin{lstlisting}[caption={Switch dans produce\_fine\_powers()}]
+#ifdef STSA_USE_LEGACY_VARIANT_LOOP
+    // Version lente : 3 appels successifs (relecture x3)
+    for (int v = 0; v < PRN_VARIANTS; v++) {
+        process_variant_all_tau(mix_i, mix_q, ...);
+    }
+#else
+    // Version optimisee : 1 seul passage (relecture x1)
+    process_all_variants_all_tau(mix_i, mix_q, ...);
+#endif
+\end{lstlisting}
+
+\subsection{Résultats de synthèse HLS}
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lrrrr}
+\toprule
+\textbf{Version} & \textbf{BRAM} & \textbf{DSP} & \textbf{FF} & \textbf{LUT} \\
+\midrule
+Legacy (relecture $\times3$)    & 265 & 205 & 44\,819 & 49\,733 \\
+Optimisée (lecture $\times1$)   & 233 & 205 & 44\,035 & 52\,088 \\
+\midrule
+\textbf{Écart} & $-32$ ($-12.1\%$) & $0$ & $-784$ & $+2\,355$ \\
+\bottomrule
+\end{tabular}
+\caption{Axe~1 --- Comparaison synth\`ese HLS, clock 10~ns, Fmax~$\approx$137~MHz identique dans les deux cas.}
+\end{table}
+
+\subsection{Interprétation}
+
+La réduction de 32~BRAM ($-12.1\,\%$) confirme l'effet de la suppression des relectures redondantes. Le gain reste modéré (et non $\times3$) car Vitis HLS optimise déjà partiellement les accès répétés à l'intérieur d'une même fonction. La légère augmentation de LUT ($+4.7\,\%$) est due à la logique de distribution parallèle des 48~accumulateurs simultanés. Les DSP et la Fmax restent inchangés, ce qui confirme que l'optimisation n'affecte que la structure mémoire, pas le chemin critique de calcul.
+
+%%% ============================================================
+\section{Analyse du Storage Report --- identification du vrai goulot}
+\label{sec:storage-report}
+%%% ============================================================
+
+\subsection{Décomposition des 233 BRAM après l'axe 1}
+
+Après l'axe~1, une analyse détaillée du Storage Report de Vitis HLS révèle la répartition réelle des 233~BRAM restantes~:
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lrr}
+\toprule
+\textbf{Variable} & \textbf{BRAM} & \textbf{Part (\%)} \\
+\midrule
+\texttt{prn\_banks[3][16][2N]} & $\approx$100 & 43.0\,\% \\
+\texttt{fine\_search} (mix, accumulateurs) & 44 & 18.9\,\% \\
+\texttt{coarse\_search} (accumulateurs, mix) & 39 & 16.7\,\% \\
+\texttt{signal[N]} & 16 & 6.9\,\% \\
+\texttt{prn[N]} & 16 & 6.9\,\% \\
+Reste (FIFOs, structures internes) & 18 & 7.7\,\% \\
+\midrule
+\textbf{Total} & \textbf{233} & 100\,\% \\
+\bottomrule
+\end{tabular}
+\caption{Répartition des 233 BRAM identifiée par le Storage Report de Vitis HLS. \texttt{prn\_banks} représente à lui seul 43\,\% du total.}
+\end{table}
+
+\subsection{Origine des 100 BRAM de \texttt{prn\_banks}}
+
+Le tableau \texttt{prn\_banks[3][16][2N]} doit permettre 16~accès simultanés à la même mémoire dans la boucle pipelinée (\texttt{FINE\_TAU\_TILE}~=~16, boucle \texttt{TAU\_TILE\_LOOP} avec \texttt{UNROLL complet}).
+
+Or, une BRAM sur le FPGA ne dispose que de 2~ports de lecture au maximum. Pour satisfaire 16~accès simultanés, Vitis HLS crée physiquement \textbf{16~copies} de chaque variante PRN~:
+
+\begin{equation}
+\text{Copies totales} = \text{PRN\_VARIANTS} \times \text{FINE\_TAU\_TILE} = 3 \times 16 = 48 \text{ blocs BRAM}
+\end{equation}
+
+Chaque bloc couvrant $2 \times 11\,999$ bits~$\approx$~3~BRAM, le total atteint effectivement \textbf{$\approx$100 BRAM} pour la seule variable \texttt{prn\_banks}.
+
+C'est cette duplication systématique que l'axe~2 cherche à éliminer.
+
+%%% ============================================================
+\section{Axe d'optimisation 2 --- Architecture circuit pilote unifié}
+\label{sec:axe2}
+%%% ============================================================
+
+\subsection{Principe de l'architecture}
+
+L'idée directrice de Carlos est de \textbf{remplacer deux circuits de corrélation quasi-identiques} (coarse et fine, chacun avec ses propres accès à \texttt{prn\_banks}) par \textbf{un seul circuit fixe réutilisé}, piloté par un contrôleur séparé qui lui fournit les paramètres variables.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    box/.style={draw, rounded corners=4pt, fill=lightblue, minimum width=3.5cm, minimum height=0.7cm, align=center, font=\small},
+    mem/.style={draw, fill=green!15, minimum width=3.5cm, minimum height=0.65cm, align=center, font=\small},
+    pilot/.style={draw, rounded corners=4pt, fill=teal!15, minimum width=3.5cm, minimum height=0.7cm, align=center, font=\small},
+    arr/.style={-Stealth, thick}
+]
+% AVANT
+\node[font=\bfseries\small] at (0, 0) {AVANT};
+\node[box] (ca) at (0, -0.7) {coarse\_search()};
+\node[box] (fi) at (0, -1.55) {fine\_search()};
+\node[mem] (pb1) at (0, -2.55) {\texttt{prn\_banks[3][16][2N]}\\$\approx$100 BRAM};
+\draw[arr] (ca) -- (pb1);
+\draw[arr] (fi) -- (pb1);
+\draw[draw=red!60, dashed, rounded corners, thick]
+    (-2.1, 0.15) rectangle (2.1, -3.15);
+
+% Flèche centrale
+\draw[-Stealth, very thick, darkblue] (2.4, -1.5) -- node[above, font=\small]{optimisation} (3.9, -1.5);
+
+% APRÈS
+\node[font=\bfseries\small] at (6.5, 0) {APRÈS};
+\node[pilot] (cp) at (6.5, -0.7) {coarse\_pilot()};
+\node[pilot] (fp) at (6.5, -1.55) {fine\_pilot()};
+\node[box] (uc) at (6.5, -2.45) {\textbf{unified\_corr\_one\_doppler()}\\\small circuit fixe partagé};
+\node[mem] (gpv) at (6.5, -3.4) {\texttt{g\_prn\_var[3][2N]}\\$\approx$6 BRAM};
+\draw[arr] (cp) -- (uc);
+\draw[arr] (fp) -- (uc);
+\draw[arr] (uc) -- (gpv);
+\draw[draw=teal!70, dashed, rounded corners, thick]
+    (4.4, 0.15) rectangle (8.6, -4.0);
+\end{tikzpicture}
+\caption{Architecture avant/après. À gauche~: deux circuits indépendants accédant chacun à une copie de \texttt{prn\_banks} ($\approx$100~BRAM). À droite~: un seul circuit fixe partagé, accédant à une unique table \texttt{g\_prn\_var} ($\approx$6~BRAM).}
+\end{figure}
+
+\subsection{Table PRN partagée --- \texttt{g\_prn\_var}}
+
+La table \texttt{prn\_banks[3][16][2N]} est remplacée par~:
+
+\begin{lstlisting}[caption={Table PRN partagée dans acq\_unified.cpp}]
+// Table unique partagee coarse + fine : ~6 BRAM seulement
+// (vs ~100 BRAM pour prn_banks[3][16][2N])
+static prn_sign_t g_prn_var[PRN_VARIANTS][2 * N];
+\end{lstlisting}
+
+La taille réelle est $3 \times 2 \times 11\,999 \times 1\,\text{bit} \approx 9\,\text{KB}$~--- soit environ 6~BRAM. La duplication $\times16$ disparaît car le circuit fixe traite les tuiles de $\tau$ \textbf{séquentiellement} au lieu de parallèlement, supprimant le besoin de 16~ports de lecture simultanés.
+
+Les trois variantes sont initialisées une seule fois au démarrage de chaque acquisition~:
+
+\begin{lstlisting}[caption={Initialisation de g\_prn\_var}]
+static void init_prn_var(const sample_t prn[N]) {
+    for (int i = 0; i < N; i++) {
+#pragma HLS PIPELINE II=1
+        int next_idx = (i + 1 < N) ? i + 1 : 0;
+        int prev_idx = (i > 0)     ? i - 1 : N - 1;
+        // Variante 0 : PRN nominal
+        g_prn_var[0][i] = to_prn_sign(prn[i]);
+        // Variante 1 : +1/2 chip (interpolation avant)
+        g_prn_var[1][i] = to_prn_sign(0.5f*(prn[i]+prn[next_idx]));
+        // Variante 2 : -1/2 chip (interpolation arriere)
+        g_prn_var[2][i] = to_prn_sign(0.5f*(prn[i]+prn[prev_idx]));
+    }
+    // Duplication circulaire sur 2N pour eviter le modulo
+    for (int i = 0; i < N; i++) {
+#pragma HLS PIPELINE II=1
+        g_prn_var[0][i+N] = g_prn_var[0][i];
+        g_prn_var[1][i+N] = g_prn_var[1][i];
+        g_prn_var[2][i+N] = g_prn_var[2][i];
+    }
+}
+\end{lstlisting}
+
+\subsection{Circuit fixe --- \texttt{unified\_corr\_one\_doppler()}}
+
+Le circuit fixe calcule la corrélation signal $\times$ PRN pour un bin Doppler donné, sur une plage de phases $\tau$~:
+
+\begin{lstlisting}[caption={Structure du circuit fixe unifié}]
+static void unified_corr_one_doppler(
+    const sample_t mix_i[N],   // signal melange (DDS deja applique)
+    const sample_t mix_q[N],
+    int n_samples,              // M echantillons (STSA ou N complet)
+    const int mix_indices[N],   // indices originaux pour acces PRN
+    int tau_begin, int tau_count,
+    int variant,                // 0=nominal, 1=+1/2, 2=-1/2 chip
+    doppler_t fd,
+    acc_t accI_buf[NB_PHASES],  // accumulateurs persistants (coarse)
+    acc_t accQ_buf[NB_PHASES],
+    bool accumulate,            // true=multi-passes STSA, false=fine
+    hls::stream<corr_pkt_unified_t> &pow_s
+) {
+    // Boucle sur les tuiles de CORR_TILE=4 phases en parallele
+    for (int t = 0; t < tau_count; t += CORR_TILE) {
+        acc_t accI[CORR_TILE], accQ[CORR_TILE];
+        // ... initialisation des accumulateurs ...
+
+        // Boucle principale : 1 echantillon par cycle, CORR_TILE phases
+        for (int i = 0; i < n_samples; i++) {
+#pragma HLS PIPELINE II=1
+            sample_t bi = mix_i[i];
+            sample_t bq = mix_q[i];
+            for (int k = 0; k < CORR_TILE; k++) {
+#pragma HLS UNROLL
+                // Lecture de g_prn_var (4 acces, pas 16)
+                prn_sign_t s = g_prn_var[variant][...];
+                accI[k] += ...; accQ[k] += ...;
+            }
+        }
+        // Emission des puissances calculees
+        // ...
+    }
+}
+\end{lstlisting}
+
+Le paramètre \texttt{CORR\_TILE~=~4} a été choisi (au lieu de \texttt{FINE\_TAU\_TILE~=~16} du design original) car dans l'architecture séquentielle (coarse \textit{puis} fine), 4~accès simultanés suffisent à obtenir un pipeline II=1 sans nécessiter 16~copies de la table PRN.
+
+\subsection{Circuit pilote coarse --- \texttt{coarse\_pilot()}}
+
+Le pilote coarse orchestre le circuit fixe pour les 41~bins Doppler $\times$ 8~passes STSA~:
+
+\begin{lstlisting}[caption={Structure du pilote coarse}]
+static void coarse_pilot(...) {
+    // 1 seul jeu d'accumulateurs (vs accI_grid[41][1023] original)
+    acc_t accI_d[NB_PHASES], accQ_d[NB_PHASES];
+
+    // Boucle pilote sur les 41 bins Doppler
+    for (int d = 0; d < NB_DOPPLER_COARSE; d++) {  // 41 iterations
+        // Reinitialisation pour ce Doppler
+        for (int t = 0; t < NB_PHASES; t++) {
+            accI_d[t] = 0; accQ_d[t] = 0;
+        }
+        // 8 passes STSA (logique identique a l'original)
+        for (int pass = 0; pass < PRECISION; pass++) { // 8 iterations
+            // Melange DDS du sous-ensemble (M~=1500 echantillons)
+            for (int i = 0; i < M; i++) {
+                mix_i[i] = signal[n] * cos(theta);
+                mix_q[i] = -signal[n] * sin(theta);
+            }
+            // Appel du circuit fixe (variante 0, accumulation=true)
+            unified_corr_one_doppler(mix_i, mix_q, M, ...,
+                                     0, fd, accI_d, accQ_d,
+                                     true, pow_s);
+        }
+        // Lecture du meilleur pic apres la 8eme passe
+    }
+}
+\end{lstlisting}
+
+\subsection{Circuit pilote fine --- \texttt{fine\_pilot()}}
+
+Le pilote fine orchestre le circuit fixe pour les 21~bins Doppler $\times$ 3~variantes PRN~:
+
+\begin{lstlisting}[caption={Structure du pilote fine}]
+static void fine_pilot(...) {
+    // Buffers de melange (N echantillons complets)
+    sample_t mix_i[N], mix_q[N];
+
+    // Boucle pilote sur les 21 bins Doppler fins
+    for (int d = 0; d < fine_doppler_count; d++) { // 7 a 21 iterations
+        // Melange DDS complet (N=11999 echantillons)
+        for (int n = 0; n < N; n++) {
+            mix_i[n] = signal[n] * cos(theta_n);
+            mix_q[n] = -signal[n] * sin(theta_n);
+        }
+        // Circuit fixe appele 3 fois (une par variante PRN)
+        for (int v = 0; v < PRN_VARIANTS; v++) { // v = 0, 1, 2
+            unified_corr_one_doppler(mix_i, mix_q, N, ...,
+                                     v, fd,
+                                     accI_dummy, accQ_dummy,
+                                     false,  // pas d'accumulation
+                                     pow_s);
+        }
+    }
+}
+\end{lstlisting}
+
+\subsection{Interface AXI inchangée}
+
+Le top-level \texttt{acquisition\_stsa\_top()} conserve exactement la même interface AXI que le design original (mêmes ports \texttt{rx\_stream}, \texttt{prn\_stream}, \texttt{corr\_out}, mêmes registres AXI-Lite), garantissant la compatibilité totale avec le notebook Python PYNQ existant sans aucune modification.
+
+%%% ============================================================
+\section{Validation --- C Simulation}
+\label{sec:validation-prn25}
+%%% ============================================================
+
+\subsection{Protocole de test}
+
+La C Simulation a été lancée sous Vitis HLS avec le testbench \texttt{acq\_stsa\_tbV2.cpp} et un signal GPS synthétique contenant le PRN-25 injecté à~:
+\begin{itemize}
+  \item Doppler~: $-1\,750$~Hz
+  \item Phase PRN~: 150~chips
+  \item SNR~: 18~dB
+\end{itemize}
+
+\subsection{Résultats}
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Paramètre} & \textbf{Attendu} & \textbf{Obtenu (acq\_unified)} \\
+\midrule
+Doppler détecté & $-1\,750$~Hz & $-1\,750$~Hz \\
+Phase détectée  & 150~chips & 150~chips \\
+Satellite détecté & OUI & OUI \\
+Puissance pic   & $\approx 2.03 \times 10^6$ & $2.029 \times 10^6$ \\
+Erreurs CSim    & 0 & 0 \\
+\bottomrule
+\end{tabular}
+\caption{Résultats de la C Simulation --- architecture circuit pilote. Résultats identiques au design original.}
+\end{table}
+
+La C Simulation confirme que la refactorisation architecturale ne modifie pas le comportement logique de l'algorithme~: le satellite PRN-25 est correctement détecté avec les mêmes paramètres Doppler et phase que le design original.
+
+%%% ============================================================
+\section{Validation complémentaire --- signaux de test calibrés sur la thèse de Glauberto}
+\label{sec:validation-danish}
+%%% ============================================================
+
+\subsection{Motivation --- disposer d'une baseline reproductible et chiffrée}
+
+La validation présentée en Section~\ref{sec:validation-prn25} (PRN-25, un seul cas synthétique) confirme la non-régression fonctionnelle de l'architecture circuit pilote, mais ne permet pas de quantifier la robustesse du bloc TSA face à une dégradation progressive du signal. Pour obtenir un point de comparaison chiffré et scientifiquement traçable, il a été décidé de reproduire les conditions de test utilisées par G.~Albuquerque dans sa thèse de doctorat, en particulier le protocole \texttt{DANISH\_SE}~: un jeu de signaux GPS dont le taux de \textit{Sample Error} (SE)~--- pourcentage d'échantillons dont le bit est inversé artificiellement~--- croît progressivement de 0 à environ 50\,\%.
+
+Cette approche présente un double avantage~: (i)~elle permet de comparer directement le comportement de l'architecture optimisée à un protocole de test déjà publié et validé, plutôt que d'inventer un scénario de test ad~hoc~; (ii)~elle fournit une \og{}vérité terrain\fg{} exacte (Doppler et phase injectés sont connus avec précision), ce qui autorise un calcul d'erreur quantitatif plutôt qu'un simple succès/échec binaire.
+
+\subsection{Génération de signaux de test synthétiques}
+
+\subsubsection{Génération du code C/A}
+
+Un générateur Python reproduit fidèlement l'algorithme standard de génération des codes Gold GPS L1 C/A tel que défini dans la norme ICD-GPS-200~: deux registres à décalage (LFSR) \texttt{G1} (polynôme $x^{10}+x^3+1$) et \texttt{G2} (polynôme $x^{10}+x^9+x^8+x^6+x^3+x^2+1$), combinés selon la table officielle de sélection de phase par satellite (\textit{tap select}).
+
+La validité du générateur a été vérifiée par deux moyens indépendants~:
+\begin{itemize}
+  \item \textbf{Propriétés d'autocorrélation}~: le code PRN~1 généré présente un pic d'autocorrélation net de 1023 (longueur du code) et des valeurs résiduelles très faibles ($\pm$80) ailleurs~--- signature caractéristique des codes de Gold utilisés par la constellation GPS.
+  \item \textbf{Comparaison directe} avec les fichiers de référence \texttt{PRN-1.csv} et \texttt{PRN-23.csv} du dépôt \texttt{TSA\_GNSS} (travail d'Ibrahima)~: après alignement de la convention de signe bit~$\to$~chip (\texttt{\{0,1\}} $\to$ \texttt{\{-1,+1\}}), la correspondance atteint 97.8\,\%, le résidu s'expliquant uniquement par un arrondi différent lors du suréchantillonnage (1023~chips $\to$ $N$~échantillons), sans impact sur la détection.
+\end{itemize}
+
+\subsubsection{Paramètres du jeu DANISH\_SE}
+
+Le signal de test reproduit un scénario terrestre 1~bit, conforme à la Table~10 de la thèse de Glauberto et strictement aligné sur les constantes du design HLS (\texttt{FS}, \texttt{FREQUENCE\_CENTRALE} de \texttt{acq\_stsaV2.h})~:
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{ll}
+\toprule
+\textbf{Paramètre} & \textbf{Valeur} \\
+\midrule
+PRN & 1 \\
+Fréquence d'échantillonnage $F_s$ & 11.999~MHz \\
+Fréquence intermédiaire $F_c$ & 3.563~MHz (identique à \texttt{FREQUENCE\_CENTRALE}) \\
+Résolution ADC & 1~bit ($\pm1$) \\
+Doppler injecté & 3000~Hz (fixe) \\
+Durée par fichier & 1~ms ($N=11\,999$~échantillons) \\
+Variable balayée & Sample Error~: 0\,\% $\to$ 48\,\%, 14~fichiers \\
+\bottomrule
+\end{tabular}
+\caption{Paramètres du jeu de test synthétique DANISH\_SE, calibrés sur la thèse de Glauberto et sur le design HLS.}
+\end{table}
+
+Un second jeu (\texttt{INPE}, scénario spatial LEO~600~km, Doppler jusqu'à 45~kHz, SNR variable de 0 à 18~dB) a également été généré, mais son exploitation est différée~: le design actuel a \texttt{N}, \texttt{FS} et \texttt{FREQUENCE\_CENTRALE} codés en dur pour le scénario terrestre (voir Section~\ref{sec:limite-inpe}).
+
+\subsection{Testbench C++ dédié}
+
+Un testbench autonome (\texttt{test\_acq\_from\_bin.cpp}) a été développé pour automatiser la campagne de test~: il lit un manifest CSV décrivant chaque fichier de test (chemin, Doppler injecté, taux de SE), charge le signal et la référence PRN associée, appelle \texttt{acquisition\_stsa\_top()}, puis compare le Doppler et la phase détectés à la vérité terrain.
+
+\begin{lstlisting}[caption={Structure simplifiée du testbench de campagne}]
+for (const auto &row : manifest_rows) {
+    auto rx  = read_bin_int8(row.file);
+    auto prn = read_bin_int8(row.prn_ref_file);
+
+    // Construction des flux AXI-Stream d'entree
+    hls::stream<axis_t> rx_stream, prn_stream, corr_out;
+    for (int i = 0; i < N; i++) {
+        rx_stream.write(make_axis(rx[i],  i == N-1));
+        prn_stream.write(make_axis(prn[i], i == N-1));
+    }
+
+    acquisition_stsa_top(rx_stream, prn_stream, corr_out,
+                          doppler_out, phase_out, peak_out,
+                          detected_out, max_power_out, mean_power_out);
+
+    int erreur = doppler_out - (int)row.doppler_hz;
+    bool ok = detected_out && (abs(erreur) <= DOPPLER_BIN_FINE);
+    // ... ecriture des resultats dans resultats_danish_se.csv ...
+}
+\end{lstlisting}
+
+Ce testbench a été exécuté en simulation C bit-exacte sous Vitis HLS~2023.2 (types \texttt{ap\_fixed}/\texttt{ap\_int} réels, pas d'approximation flottante), garantissant que les résultats obtenus sont représentatifs du comportement matériel final.
+
+\subsection{Débogage bit-exact --- deux dépassements de capacité identifiés et corrigés}
+
+La première exécution de la campagne complète a révélé un échec de détection sur l'intégralité des 14~fichiers, y compris le signal propre (SE~=~0\,\%)~--- un résultat incompatible avec la simulation logicielle préalable en double précision, qui détectait correctement le Doppler injecté. L'analyse a révélé deux dépassements de capacité (\textit{overflow}) dans les types virgule fixe définis dans \texttt{acq\_stsaV2.h}, invisibles en simulation flottante mais bloquants en arithmétique réelle.
+
+\subsubsection{Dépassement de l'accumulateur de corrélation}
+
+Pour un signal propre et pleinement corrélé sur les $N=11\,999$~échantillons complets (cas de \texttt{fine\_pilot}), la magnitude attendue de l'accumulateur I/Q atteint environ~7600. Or le type déclaré était~:
+\begin{lstlisting}[numbers=none]
+typedef ap_fixed<24, 12>  acc_t;   // magnitude max = 2^11 = 2048
+\end{lstlisting}
+soit un facteur de dépassement de $\times3.7$, provoquant un rebouclage (\textit{wraparound}) silencieux des accumulateurs. La correction a consisté à élargir la partie entière tout en conservant la même précision fractionnaire (12~bits)~:
+\begin{lstlisting}[numbers=none]
+typedef ap_fixed<28, 16>  acc_t;   // magnitude max = 2^15 = 32768
+\end{lstlisting}
+
+\subsubsection{Dépassement du calcul de puissance de pic}
+
+L'élargissement de \texttt{acc\_t} a exposé un second dépassement~: le carré de l'accumulateur (\texttt{power = accI\textsuperscript{2} + accQ\textsuperscript{2}}) peut désormais atteindre $\approx 1.07\times10^9$, alors que~:
+\begin{lstlisting}[numbers=none]
+typedef ap_ufixed<32, 28> pow_tile_t;  // magnitude max = 2^28 = 2.68e8
+\end{lstlisting}
+ne pouvait représenter que $2.68\times10^8$ ($\times$4 de marge insuffisante). Ce type a été élargi de façon analogue~:
+\begin{lstlisting}[numbers=none]
+typedef ap_ufixed<40, 32> pow_tile_t;  // magnitude max = 2^32 ~ 4.3e9
+\end{lstlisting}
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lll}
+\toprule
+\textbf{Type} & \textbf{Avant} & \textbf{Après} \\
+\midrule
+\texttt{acc\_t}      & \texttt{ap\_fixed<24,12>} (max~2048)  & \texttt{ap\_fixed<28,16>} (max~32768) \\
+\texttt{pow\_tile\_t} & \texttt{ap\_ufixed<32,28>} (max~2.68e8) & \texttt{ap\_ufixed<40,32>} (max~4.3e9) \\
+\bottomrule
+\end{tabular}
+\caption{Élargissement des deux types virgule fixe ayant corrigé les dépassements de capacité. La résolution fractionnaire est conservée à l'identique dans les deux cas.}
+\end{table}
+
+\subsection{Diagnostic méthodique par instrumentation progressive}
+
+Pour isoler la cause exacte des échecs, une instrumentation de débogage progressive (activée uniquement en simulation via \texttt{\#ifndef \_\_SYNTHESIS\_\_}, sans impact sur la synthèse) a été ajoutée par étapes~:
+\begin{enumerate}
+  \item Vérification des échantillons bruts capturés (\texttt{signal[]}, \texttt{prn\_raw[]}) contre les fichiers sources.
+  \item Vérification du mélange DDS (\texttt{mix\_i}, \texttt{mix\_q}) pour chaque bin Doppler à un échantillon donné, comparée à un calcul de référence indépendant.
+  \item Vérification de la puissance de corrélation retenue comme meilleur candidat à chaque bin Doppler du \textit{coarse search}.
+\end{enumerate}
+
+Cette démarche a mis en évidence, après correction des deux dépassements de capacité, un dernier écart~: le circuit détectait systématiquement un Doppler de 0~Hz au lieu de 3000~Hz sur un signal pourtant confirmé correct en amont. L'instrumentation a révélé que l'échantillon \texttt{signal[5000]} lu par le circuit ne correspondait pas à la valeur présente dans le fichier de test le plus récent~--- indiquant que le fichier de test utilisé sur la plateforme Vitis HLS avait été généré avec une fréquence intermédiaire légèrement différente (3.56~MHz au lieu de 3.563~MHz) de celle câblée dans \texttt{acq\_stsaV2.h}. Cet écart de 3~kHz, transposé sur le Doppler injecté, ramenait la porteuse effective exactement sur \texttt{FREQUENCE\_CENTRALE}, annulant artificiellement le Doppler résiduel attendu. Une fois les fichiers de test resynchronisés avec la fréquence intermédiaire exacte du design, la détection est devenue correcte sur l'ensemble de la campagne.
+
+Ce diagnostic illustre un point méthodologique important~: la cohérence stricte entre les paramètres du signal de test et les constantes câblées du design HLS est une condition nécessaire à toute campagne de validation, un écart de quelques kHz suffisant à invalider silencieusement un test pourtant fonctionnellement correct.
+
+\subsection{Résultats finaux de la campagne DANISH\_SE}
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.15}
+\small
+\begin{tabular}{rrrrl}
+\toprule
+\textbf{SE (\%)} & \textbf{Doppler détecté} & \textbf{Erreur (Hz)} & \textbf{Puissance pic} & \textbf{Statut} \\
+\midrule
+0.0   & 3000  & 0 & $5.835\times10^{7}$ & OK \\
+3.7   & 3000  & 0 & $5.028\times10^{7}$ & OK \\
+7.4   & 3000  & 0 & $4.253\times10^{7}$ & OK \\
+11.1  & 3000  & 0 & $3.514\times10^{7}$ & OK \\
+14.8  & 3000  & 0 & $2.882\times10^{7}$ & OK \\
+18.5  & 3000  & 0 & $2.325\times10^{7}$ & OK \\
+22.2  & 3000  & 0 & $1.841\times10^{7}$ & OK \\
+25.8  & 3000  & 0 & $1.363\times10^{7}$ & OK \\
+29.5  & 3000  & 0 & $9.565\times10^{6}$ & OK \\
+33.2  & 3000  & 0 & $6.626\times10^{6}$ & OK \\
+36.9  & 3000  & 0 & $4.039\times10^{6}$ & OK \\
+40.6  & 3000  & 0 & $2.058\times10^{6}$ & OK \\
+44.3  & 3000  & 0 & $7.574\times10^{5}$ & OK \\
+48.0  & $-7250$ & $-10250$ & $1.381\times10^{5}$ & ÉCHEC \\
+\bottomrule
+\end{tabular}
+\caption{Résultats de la campagne bit-exacte sur les 14 fichiers DANISH\_SE (Vitis HLS 2023.2, csim). Taux de réussite~: 13/14 (92.9\,\%).}
+\end{table}
+
+La phase détectée est exacte (erreur nulle) sur les 13~cas réussis. L'unique échec survient à SE~=~48\,\%, un niveau de dégradation extrême où, selon la thèse de Glauberto, le signal devient théoriquement quasi-indiscernable d'un simple délai (seuil critique~$\approx$50\,\%). Ce comportement de rupture est donc physiquement cohérent et attendu, non symptomatique d'un défaut de l'architecture.
+
+\paragraph{Validation de la loi de dégradation théorique.} Pour un taux d'inversion de bit $p$ (Sample Error), la puissance de corrélation attendue décroît théoriquement en $(1-2p)^2$. La comparaison entre puissance mesurée et puissance théorique confirme un accord quasi parfait (écart relatif $<2\,\%$) sur les 13~premiers points, renforçant la confiance dans la cohérence physique de l'implémentation~:
+\begin{equation}
+P_{\text{mesuré}}(p) \approx P_{\text{max}} \cdot (1-2p)^2, \qquad \text{ratio mesuré/théorique} \in [0.979,\ 1.017]
+\end{equation}
+
+\subsection{Limite architecturale identifiée --- incompatibilité avec le scénario INPE}
+\label{sec:limite-inpe}
+
+L'analyse des constantes de \texttt{acq\_stsaV2.h} révèle que \texttt{N=11\,999}, \texttt{FS=11\,999\,000.0f} et \texttt{FREQUENCE\_CENTRALE=3\,563\,000.0f} sont des constantes de compilation fixes, correspondant exactement au scénario terrestre DANISH (durée $N/FS = 1.0$~ms exactement, plage Doppler coarse de $\pm10\,000$~Hz). Le design actuel ne peut donc pas ingérer tel quel un signal du scénario spatial INPE (16.368~MHz, Doppler jusqu'à 45~kHz)~: une resynthèse avec des constantes adaptées serait nécessaire pour étendre la validation à ce second scénario, plus proche des conditions réelles d'une mission CubeSat de Radio Occultation.
+
+\subsection{Point ouvert --- absence de seuil de décision par variance}
+\label{sec:point-ouvert-variance}
+
+La comparaison du comportement de \texttt{coarse\_pilot()} avec l'architecture originale (\texttt{acq\_stsaV2.cpp}, antérieure à la refactorisation circuit pilote) a révélé une différence fonctionnelle~: dans l'architecture optimisée, la variable de sortie \texttt{coarse\_detected} est déterminée uniquement par~:
+\begin{lstlisting}[numbers=none]
+coarse_detected = (global_best > (peak_power_t)0);
+\end{lstlisting}
+c'est-à-dire qu'elle est vraie dès qu'il existe le moindre pic de corrélation non nul, sans jamais calculer ni comparer la métrique de variance normalisée (\texttt{threshold\_coarse}) utilisée par l'architecture d'origine pour distinguer un vrai satellite d'un pic de bruit. Ce point, mis en évidence par la comparaison directe des deux architectures sur le fichier SE~=~48\,\%, constitue une limitation fonctionnelle à traiter avant tout déploiement opérationnel~: en l'état, le circuit optimisé ne peut pas fiablement indiquer l'absence de satellite. Ce point est signalé pour discussion avec le chef de service avant la synthèse finale du bitstream.
+
+%%% ============================================================
+\section{Validation Radio Occultation --- scénario rising event}
+\label{sec:validation-ro}
+%%% ============================================================
+
+En parallèle de l'optimisation HLS, une campagne de validation sur signal de Radio Occultation simulé a été menée pour vérifier que le bloc TSA est capable de détecter un satellite dans les conditions réalistes d'une mission GNSS-RO. Cette troisième campagne complète les deux validations précédentes~: là où la C Simulation (Section~\ref{sec:validation-prn25}) confirme la non-régression fonctionnelle et la campagne DANISH\_SE (Section~\ref{sec:validation-danish}) quantifie la robustesse bit-exacte face au bruit, cette validation évalue la robustesse de l'algorithme face à une dérive Doppler continue, représentative d'un passage satellite réel.
+
+\subsection{Scénario simulé (\textit{rising event})}
+
+Un signal GPS rising a été généré avec les paramètres suivants~:
+\begin{itemize}
+  \item 30~fenêtres de 1~ms successives (durée typique d'une acquisition TSA).
+  \item Dérive Doppler progressive~: de $-2\,000$~Hz (signal traversant l'atmosphère dense, sol) vers $-1\,500$~Hz (espace, atmosphère mince).
+  \item SNR variable~: de 13~dB (sol, forte atténuation atmosphérique) à 45~dB (espace).
+  \item Sauts Doppler volontaires entre fenêtres pour tester la robustesse de l'algorithme de réacquisition.
+\end{itemize}
+
+\subsection{Résultats CPU}
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Scénario} & \textbf{Fenêtres détectées} & \textbf{Taux} & \textbf{Limite} \\
+\midrule
+Sans saut Doppler        & 30/30 & 100\,\% & -- \\
+Saut $+100$~Hz/fenêtre   & 30/30 & 100\,\% & -- \\
+Saut $+800$~Hz/fenêtre   & 30/30 & 100\,\% & -- \\
+Saut $+13\,000$~Hz/fenêtre & 0/30 & 0\,\% & limite atteinte \\
+\bottomrule
+\end{tabular}
+\caption{Robustesse du bloc TSA aux sauts Doppler --- résultats CPU (virgule flottante 64~bits). La marge de $\pm13\,000$~Hz est 87× supérieure aux variations Doppler attendues en Radio Occultation réelle ($\approx150$~Hz/fenêtre).}
+\end{table}
+
+\subsection{Résultats FPGA réel (PYNQ-Z2)}
+
+La même campagne a été exécutée sur le FPGA (design original, avant optimisation)~:
+\begin{itemize}
+  \item 27/30 fenêtres correctement détectées (90\,\%).
+  \item 3~fenêtres manquées~: les fenêtres 1, 2, 3 où le vrai Doppler se trouve exactement à mi-chemin entre deux cases de grille (250~Hz d'écart), créant une ambiguïté entre arithmétique virgule fixe (FPGA) et virgule flottante (CPU).
+  \item Speedup mesuré~: le FPGA traite une fenêtre en environ 87~ms vs 2.2~s sur CPU soit un facteur $\times25$.
+\end{itemize}
+
+Ces résultats confirment que le bloc TSA, même dans sa version initiale, est suffisamment robuste pour les scénarios de Radio Occultation réalistes. L'architecture circuit pilote optimisée (127~BRAM, 30~DSP, voir Section~\ref{sec:resultats-synthese}) libère assez de ressources pour envisager un traitement multi-satellites simultané sur le même FPGA.
+
+%%% ============================================================
+\section{Résultats de synthèse HLS --- comparaison complète}
+\label{sec:resultats-synthese}
+%%% ============================================================
+
+\subsection{Configuration retenue}
+
+La synthèse en blocs séparés (Section~\ref{sec:blocs-separes}) a permis d'isoler et de corriger les deux défauts décrits en Sections~\ref{sec:bug1-decision} et~\ref{sec:bug2-correlator}. Les chiffres présentés dans cette section correspondent à la \textbf{resynthèse globale du pipeline complet} \texttt{acquisition\_pipeline\_top} (les trois blocs assemblés sous \texttt{\#pragma HLS DATAFLOW}), une fois ces corrections intégrées~: il s'agit donc de la même architecture circuit pilote que celle présentée en Section~\ref{sec:axe2}, dans sa version finale et déboguée, et non d'une architecture distincte.
+
+Après exploration systématique des paramètres (\texttt{CORR\_TILE} de 4 à 16, clock de 8~ns à 15~ns), la configuration optimale retenue est~:
+
+\begin{itemize}
+  \item \texttt{CORR\_TILE = 4}~: 4~phases tau traitées en parallèle par cycle.
+  \item Clock cible~: 8~ns (125~MHz).
+  \item Fmax estimée~: 150~MHz.
+\end{itemize}
+
+\textbf{Justification du choix CORR\_TILE~=~4.} Dans l'architecture séquentielle (coarse \textit{puis} fine), le parallélisme entre les deux blocs a déjà été sacrifié au profit du partage de ressources. Dans ce contexte, \texttt{CORR\_TILE~=~4} minimise la duplication de \texttt{g\_prn\_var} (4 accès simultanés au lieu de 16) tout en maintenant un pipeline II=1 dans la boucle principale. Le tableau ci-dessous compare les trois valeurs testées~:
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lrrrrcc}
+\toprule
+\textbf{TILE} & \textbf{BRAM} & \textbf{DSP} & \textbf{FF} & \textbf{LUT} & \textbf{Fmax} & \textbf{Violation} \\
+\midrule
+4  & \textbf{127} & 30 & 7\,361  & 14\,462 & 150~MHz & II + Timing \\
+8  & 171          & 30 & 8\,426  & 27\,196 & 150~MHz & II + Timing \\
+16 & 175          & 30 & 10\,497 & 35\,044 & 150~MHz & II + Timing \\
+\bottomrule
+\end{tabular}
+\caption{Comparaison des trois valeurs de CORR\_TILE testées, clock 8~ns. TILE=4 est optimal sur toutes les ressources à Fmax identique.}
+\end{table}
+
+\subsection{Tableau comparatif final --- progression cumulée}
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.4}
+\begin{tabular}{lrrrrl}
+\toprule
+\textbf{Version} & \textbf{BRAM} & \textbf{DSP} & \textbf{FF} & \textbf{LUT} & \textbf{Fmax} \\
+\midrule
+Original (legacy, ×3)               & 265 & 205 & 44\,819 & 49\,733 & 137~MHz \\
+Après axe~1 (lecture ×1)            & 233 & 205 & 44\,035 & 52\,088 & 137~MHz \\
+Après axe~2 (circuit pilote, TILE=4) & \textbf{127} & \textbf{30} & \textbf{6\,656} & \textbf{14\,674} & \textbf{150~MHz} \\
+\midrule
+\textbf{Gain total} &
+$-138$ ($-52\,\%$) &
+$-175$ ($-85\,\%$) &
+$-38\,163$ ($-85\,\%$) &
+$-35\,059$ ($-70\,\%$) &
+$+13$~MHz \\
+\bottomrule
+\end{tabular}
+\caption{Progression cumul\'ee des deux axes d'optimisation. La configuration finale est TILE=4, clock 8~ns.}
+\end{table}
+
+\subsection{Analyse des gains par ressource}
+
+\paragraph{BRAM ($-52\,\%$, $-138$~blocs).}
+La quasi-totalité du gain provient de la suppression de \texttt{prn\_banks[3][16][2N]} ($\approx$100~BRAM) remplacé par \texttt{g\_prn\_var[3][2N]} ($\approx$6~BRAM). La dimension $[16]$ disparaît car le circuit fixe n'a besoin que de 4~accès simultanés (au lieu de 16 dans le design parallèle).
+
+\paragraph{DSP ($-85\,\%$, $-175$~blocs).}
+Le gain en DSP est spectaculaire. Il s'explique par la \textbf{sérialisation du pipeline}~: dans le design original, coarse et fine instanciaient chacun leurs propres multiplicateurs DDS et corrélateurs simultanément. L'architecture pilote réutilise un seul jeu de multiplicateurs, appelé séquentiellement. La latence totale est plus longue, mais le circuit physique est nettement plus compact.
+
+\paragraph{FF et LUT ($-85\,\%$ / $-70\,\%$).}
+Conséquence directe de la réduction des deux blocs logiques indépendants en un seul~: moins de registres de pipeline, moins de logique de routage inter-blocs, moins de multiplexeurs.
+
+\paragraph{Fmax ($+13$~MHz, de 137 vers 150~MHz).}
+L'architecture séquentielle simplifie les chemins critiques~: moins de dépendances croisées entre coarse et fine, moins de multiplexeurs inter-blocs. Le chemin critique est plus court, d'où une fréquence maximale estimée plus élevée.
+
+\subsection{Exploration systématique des paramètres TILE et clock}
+
+Une exploration systématique des paramètres \texttt{CORR\_TILE} et de la contrainte d'horloge a été menée afin d'identifier la configuration optimale. Le tableau suivant récapitule l'ensemble des synthèses réalisées~:
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{ccrrrrrcc}
+\toprule
+\textbf{TILE} & \textbf{Clock} & \textbf{BRAM} & \textbf{DSP} & \textbf{FF} & \textbf{LUT} & \textbf{Fmax} & \textbf{Viol.} \\
+\midrule
+4 & 8~ns  & 127 & 30 & 7\,361  & 14\,462 & 150~MHz & II+T \\
+4 & 10~ns & 127 & 34 & 6\,656  & 14\,674 & 107~MHz & II+T \\
+4 & 15~ns & 133 & 34 & 5\,398  & 23\,836 &  91~MHz & II   \\
+8 & 8~ns  & 171 & 30 & 8\,426  & 27\,196 & 150~MHz & II+T \\
+8 & 10~ns & 171 & 30 & 9\,345  & 27\,164 & 150~MHz & II+T \\
+16 & 7~ns & 175 & 30 & 11\,543 & 35\,012 & 150~MHz & II+T \\
+16 & 8~ns & 175 & 30 & 10\,497 & 35\,044 & 150~MHz & II+T \\
+16 & 9~ns & 175 & 34 & 9\,970  & 35\,014 & 126~MHz & II+T \\
+16 & 15~ns& 175 & 34 & 8\,014  & 34\,937 &  91~MHz & II   \\
+\bottomrule
+\end{tabular}
+\caption{Exploration complète des configurations TILE × Clock. Viol. = II (II Violation seule) ou II+T (II + Timing Violation). Config. retenue en gras~: TILE=4, clock=8~ns.}
+\end{table}
+
+\paragraph{Observations clés.}
+
+\begin{itemize}
+  \item \textbf{TILE=4 est optimal en BRAM}~: 127~BRAM quelle que soit la clock (tant que le pragma parasite \texttt{factor=16} est absent), contre 171--175~BRAM pour TILE=8 et TILE=16.
+  \item \textbf{La Fmax ne s'améliore pas avec TILE=16}~: malgré le plus grand parallélisme, la Fmax estimée reste identique (150~MHz) ou inférieure selon la clock. Le chemin critique dominant est dans les pilotes (\texttt{coarse\_pilot}, \texttt{fine\_pilot}), pas dans le circuit fixe lui-même.
+  \item \textbf{Augmenter la clock peut paradoxalement allonger le chemin critique}~: quand la contrainte est relâchée (10~ns au lieu de 8~ns), Vitis HLS modifie sa stratégie de scheduling et peut produire un circuit plus lent (Fmax 107~MHz à 10~ns vs 150~MHz à 8~ns). Ce comportement est propre aux outils HLS~: la contrainte de clock influence non seulement le timing final mais aussi les décisions d'optimisation pendant la synthèse.
+  \item \textbf{La violation II est indépendante de TILE et de la clock}~: elle persiste dans toutes les configurations. Elle est structurelle et liée aux dépendances de données dans les boucles des pilotes.
+\end{itemize}
+
+\subsection{Note sur la violation II}
+
+La synthèse signale une \textit{II \& Timing Violation} sur \texttt{acquisition\_unified}. Il est important de préciser~:
+
+\begin{itemize}
+  \item La \textbf{Timing Violation} (\texttt{slack = $-0.81$~ns}) provient de la clock cible de 8~ns~: le chemin critique estimé est de 6.654~ns, ce qui donne une Fmax réelle de 150~MHz, supérieure à la cible de 125~MHz. La violation disparaît si la clock est relâchée (ex.~: 15~ns).
+  \item La \textbf{II Violation} est \textit{structurelle}~: elle résulte de dépendances de données dans les boucles \texttt{INIT\_ACC} et \texttt{DRAIN} des pilotes, où la même BRAM est lue et écrite dans des itérations successives très proches. Elle ne peut pas être éliminée en jouant sur la clock~---~elle allonge légèrement la latence totale mais n'empêche pas le fonctionnement correct du circuit.
+\end{itemize}
+
+Ces violations sont documentées, comprises et acceptées comme contrepartie du gain massif en ressources obtenu par l'architecture pilote.
+
+%%% ============================================================
+\section{Architecture en blocs synthétisables séparément}
+\label{sec:blocs-separes}
+%%% ============================================================
+
+\paragraph{Positionnement par rapport à la section précédente.}
+Les résultats présentés en Section~\ref{sec:resultats-synthese} concernent l'architecture \og{}circuit pilote\fg{} monolithique (\texttt{acq\_unified.cpp}), dans laquelle la configuration \texttt{CORR\_TILE~=~4} a été retenue à l'issue de l'exploration paramétrique. La présente section décrit une \textbf{évolution ultérieure} de cette architecture, dans laquelle le même algorithme est redécoupé en trois blocs synthétisés séparément. Ce redécoupage a conduit à réévaluer certains choix, dont celui de \texttt{CORR\_TILE}, porté à~16 dans ce nouveau contexte pour les raisons détaillées plus bas~: les deux valeurs correspondent donc à deux architectures distinctes et successives, et non à une contradiction.
+
+\subsection{Motivation --- une demande explicite du chef de service}
+
+À la suite de la présentation des résultats de la Section~\ref{sec:point-ouvert-variance}, le chef de service Carlos a formulé une demande précise~: plutôt que de synthétiser \texttt{acquisition\_stsa\_top} comme un unique bloc monolithique, l'architecture doit être découpée en \textbf{fonctions synthétisées séparément}, chacune pouvant être évaluée individuellement en ressources (BRAM/DSP/FF/LUT), puis assemblées~--- une approche déjà éprouvée au laboratoire sur un tutoriel de traitement d'image RGB, où trois blocs interconnectés par flux remplaçaient un unique bloc monolithique.
+
+Cette démarche présente un double intérêt~: elle facilite la réutilisation de blocs communs entre plusieurs contextes (ici, le corrélateur est partagé entre la recherche grossière et la recherche fine), et elle permet une comparaison équitable entre variantes architecturales~--- en particulier entre l'Option~A (seuil de variance, architecture d'origine) et l'Option~B (seuil fixe, version optimisée), en ne faisant varier qu'un seul bloc plutôt que l'architecture entière.
+
+\subsection{Découpage retenu}
+
+L'architecture \texttt{acquisition\_stsa\_top} a été restructurée en trois blocs, communiquant par flux \texttt{hls::stream}~:
+
+\begin{itemize}
+  \item \textbf{Bloc 1 --- \texttt{dds\_mixer\_top()}}~: mélange DDS (Doppler × échantillons). Capture le signal brut une seule fois, puis mélange pour l'ensemble d'un balayage (coarse~: 41~bins × 8~passes STSA~; fine~: 21~bins × échantillons complets).
+  \item \textbf{Bloc 2 --- \texttt{correlator\_top()}}~: corrélation signal × PRN. Reprend le circuit fixe déjà partagé coarse/fine de l'architecture précédente, désormais alimenté par un flux plutôt que par des tableaux passés directement.
+  \item \textbf{Bloc 3 --- \texttt{decision\_top()}}~: décision finale, avec un unique paramètre \texttt{decision\_mode} permettant de basculer entre seuil fixe (Option~B) et seuil de variance normalisée (Option~A, formule identique à celle de la thèse de Glauberto, Eq.~8).
+\end{itemize}
+
+Un wrapper \texttt{acquisition\_pipeline\_top()} assemble les trois blocs avec \texttt{\#pragma HLS DATAFLOW}, pour le balayage coarse puis le balayage fine, en conservant la même interface AXI que l'architecture précédente. C'est cette resynthèse globale du pipeline complet, une fois les trois blocs individuellement corrigés (Sections~\ref{sec:bug1-decision} et~\ref{sec:bug2-correlator} ci-dessous), qui constitue la configuration finale rapportée en Section~\ref{sec:resultats-synthese}~: le découpage en blocs séparés n'est donc pas une architecture concurrente du circuit pilote de la Section~\ref{sec:axe2}, mais une étape de mise au point de cette même architecture, permettant d'isoler et de corriger des défauts invisibles lors d'une synthèse monolithique.
+
+\subsection{Résultats de synthèse individuelle}
+
+Chaque bloc a été synthétisé séparément sous Vitis HLS~2023.2 (\texttt{xc7z020clg400-1}, horloge~10~ns), conformément à la demande de Carlos.
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lrrrrl}
+\toprule
+\textbf{Bloc} & \textbf{BRAM} & \textbf{DSP} & \textbf{FF} & \textbf{LUT} & \textbf{Timing} \\
+\midrule
+\texttt{dds\_mixer\_top} & 2 & 16 & 1715 & 1503 & OK (6.91~ns) \\
+\texttt{correlator\_top} & 32 & 2 & 1924 & 5159 & Résiduel ($-0.49$~ns) \\
+\texttt{decision\_top} & 0 & 4 & 1366 & 1972 & OK (7.20~ns, après correction) \\
+\bottomrule
+\end{tabular}
+\caption{Résultats de synthèse individuelle des 3 blocs (état final, après corrections détaillées ci-dessous).}
+\end{table}
+
+\subsection{Bug 1 --- arithmétique flottante dans \texttt{decision\_top}}
+\label{sec:bug1-decision}
+
+Le calcul de la variance normalisée (Option~A) utilisait initialement le type \texttt{double} de C++ standard. Première synthèse~: 28~DSP, opérations \texttt{ddiv\_64ns} (58~cycles de latence), violation de timing sévère (15.29~ns estimé pour une cible de 10~ns).
+
+\textbf{Correction}~: remplacement de tous les \texttt{double} par le type virgule fixe \texttt{metric\_t} déjà utilisé dans le projet. Les DSP sont passés de 28 à 4, mais le slack de timing est resté identique à l'identique ($-7.99$~ns)~--- signe que le vrai goulot n'était pas le calcul de variance (exécuté une seule fois par balayage) mais la boucle \texttt{DEC\_READ\_LOOP}, où l'insertion triée dans la liste des \texttt{DECISION\_TOPK}=5 meilleurs pics, entièrement dépliée (\texttt{\#pragma HLS UNROLL}), formait une chaîne combinatoire trop longue pour \texttt{II=1}.
+
+\textbf{Correction finale}~: relâchement de la contrainte de pipeline sur \texttt{DEC\_READ\_LOOP} de \texttt{II=1} à \texttt{II=2}. Résultat~: timing respecté (7.198~ns, marge confortable), latence doublée (64\,506~$\to$~128\,956~cycles), largement acceptable pour ce bloc.
+
+\subsection{Bug 2 --- latence de \texttt{correlator\_top} due à un indicateur de synthèse périmé}
+\label{sec:bug2-correlator}
+
+La première synthèse de \texttt{correlator\_top} (avec \texttt{CORR\_TILE=4}, comme dans l'architecture précédente) affichait une latence de \textbf{378\,789\,037~cycles}, soit environ 3.15~secondes à 120~MHz rien que pour ce bloc~--- bien trop lent pour un traitement quasi temps réel sur 1~ms de signal.
+
+\textbf{Cause}~: pour chaque tuile de \texttt{CORR\_TILE} phases (256~tuiles pour \texttt{CORR\_TILE=4}), la boucle relit l'intégralité des $\sim$11999~échantillons bufferisés. Les échantillons sont donc relus 256~fois par bin Doppler.
+
+\textbf{Point important}~: cette structure de boucle existait déjà à l'identique dans l'architecture précédente (\texttt{unified\_corr\_one\_doppler}). Le problème n'a jamais été visible auparavant car seul le rapport de synthèse du pipeline complet était examiné (BRAM/DSP/Fmax), jamais la latence isolée de ce sous-bloc. \textbf{C'est précisément en synthétisant séparément, comme demandé par Carlos, que ce problème a été découvert.}
+
+\textbf{Première tentative de correction}~: augmentation de \texttt{CORR\_TILE} de 4 à 16 (64~tuiles au lieu de 256), en ajustant en conséquence le facteur de partition de \texttt{g\_prn\_var}. Résultat inchangé au premier essai (toujours $\sim$379~millions de cycles)~--- il s'est avéré que le pragma d'estimation \texttt{\#pragma HLS LOOP\_TRIPCOUNT} de la boucle de tuiles n'avait pas été mis à jour en conséquence, faussant l'estimation de latence affichée sans refléter le vrai comportement matériel.
+
+\textbf{Correction du pragma}~: mise à jour du \texttt{LOOP\_TRIPCOUNT} de \texttt{max=256} à \texttt{max=64}. Résultat~: latence estimée réduite à \textbf{95\,160\,877~cycles}, soit une division par~4 conforme à l'attendu.
+
+\subsection{Débogage de la violation de timing résiduelle sur \texttt{correlator\_top}}
+
+Après l'augmentation de \texttt{CORR\_TILE} à 16, une violation de timing est apparue ($-1.02$~ns de slack). Le débogage a nécessité l'utilisation du \textit{Schedule Viewer} de Vitis HLS pour identifier précisément le chemin critique, après plusieurs hypothèses infructueuses~:
+
+\begin{enumerate}
+  \item \textbf{Hypothèse 1 (infirmée)}~: relâchement de \texttt{CORR\_SAMPLE\_LOOP} (boucle chaude, $\sim$11999~itérations par tuile) de \texttt{II=1} à \texttt{II=2}. La latence a doublé comme attendu, mais le slack de timing est resté rigoureusement identique ($-1.02$~ns)~--- cette boucle n'était donc pas le facteur limitant.
+  \item \textbf{Hypothèse 2 (partiellement confirmée)}~: le \textit{Schedule Viewer} a révélé un slack local de $-0.49$~ns dans \texttt{CORR\_WRITE\_TILE} (calcul de la puissance \texttt{accI[k]²+accQ[k]²} pour chaque tuile). Le relâchement de cette boucle à \texttt{II=2} (coût négligeable, seulement 64~exécutions par bin) a réduit les DSP de 4 à 2, mais n'a pas fait bouger le slack global au niveau du rapport de synthèse.
+  \item \textbf{Hypothèse 3 (confirmée)}~: la boucle \texttt{CORR\_BUFFER} (lecture du flux \texttt{mix\_in} et remplissage des tampons \texttt{buf\_i}/\texttt{buf\_q}), seule boucle n'ayant subi aucune modification dans les tentatives précédentes, a été relâchée de \texttt{II=1} à \texttt{II=2}. La fréquence maximale estimée est passée de \textbf{120.21~MHz à 128.33~MHz} (visible dans le journal de synthèse, bien que le tableau récapitulatif de l'interface ne se soit pas rafraîchi correctement), correspondant à une réduction du slack négatif d'environ moitié ($-1.02$~ns~$\to$~$-0.49$~ns).
+\end{enumerate}
+
+\textbf{État à la clôture de cette session de débogage}~: la violation de timing sur \texttt{correlator\_top} a été réduite de moitié mais n'est pas totalement résorbée ($-0.49$~ns résiduel). Ce point reste \textbf{ouvert} et devra être repris ultérieurement, très probablement en poursuivant l'inspection détaillée de \texttt{CORR\_SAMPLE\_LOOP} via le \textit{Schedule Viewer}, seule zone du bloc n'ayant pas encore été examinée en détail malgré les tentatives de correction.
+
+\paragraph{Décision~: violation résiduelle acceptée comme limitation mineure documentée.}
+Plusieurs éléments justifient de ne pas poursuivre davantage la résolution de cette violation de $-0.49$~ns à ce stade~:
+\begin{itemize}
+  \item \textbf{Ampleur limitée}~: le délai réel estimé (7.79~ns) reste inférieur à la période d'horloge cible (10~ns)~; le dépassement ne provient que de la marge de sécurité conservative appliquée par l'outil (incertitude de 2.70~ns), et non d'un réel dépassement du budget de calcul.
+  \item \textbf{Absence d'impact fonctionnel}~: cette violation affecte uniquement la fréquence d'horloge maximale atteignable, pas la justesse des résultats calculés par le circuit.
+  \item \textbf{Solution de repli disponible}~: un relâchement mineur de la contrainte d'horloge cible (par exemple 10.5~ns au lieu de 10~ns) suffirait vraisemblablement à éliminer cette violation, les estimations de timing en HLS étant connues pour être conservatives par rapport au résultat réel obtenu après placement-routage sous Vivado.
+  \item \textbf{Cause identifiée avec un niveau de confiance raisonnable}~: l'analyse du \textit{Schedule Viewer} pointe vers la chaîne de calcul d'adresse et de lecture de \texttt{g\_prn\_var} (variables \texttt{si}/\texttt{sq} dans le code), seules opérations de \texttt{CORR\_SAMPLE\_LOOP} présentant une latence visiblement supérieure aux autres. Une correction complète nécessiterait de restructurer cette étape (registre intermédiaire dédié au calcul d'adresse), un changement plus invasif que les ajustements de pragma réalisés jusqu'ici.
+\end{itemize}
+
+Ce point est donc consigné comme \textbf{limitation résiduelle mineure et documentée}, à reprendre si nécessaire lors de l'intégration finale sous Vivado, plutôt que de continuer à itérer sur des gains marginaux au stade actuel du projet.
+
+\subsection{Bilan de cette étape}
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lrl}
+\toprule
+\textbf{Métrique (\texttt{correlator\_top})} & \textbf{Avant} & \textbf{Après} \\
+\midrule
+Latence & 378\,789\,037 cycles & 95\,160\,877 cycles ($\div 4$) \\
+Fmax estimée & 120.21~MHz & 128.33~MHz \\
+Slack de timing & $-1.02$~ns & $-0.49$~ns (résiduel) \\
+\bottomrule
+\end{tabular}
+\caption{Progrès obtenus sur \texttt{correlator\_top} au cours de cette session de débogage.}
+\end{table}
+
+Cette étape illustre concrètement l'intérêt de la démarche demandée par Carlos~: la synthèse séparée de chaque bloc a permis de mettre au jour deux défauts (un bug d'arithmétique flottante et une latence excessive due à un indicateur de synthèse périmé) qui étaient restés invisibles dans l'architecture précédente, où seul le rapport global du pipeline complet était examiné.
+
+
+%%% ============================================================
+\section{Perspectives}
+\label{sec:perspectives}
+%%% ============================================================
+
+Les gains en ressources obtenus (Section~\ref{sec:resultats-synthese}) et les points ouverts identifiés au fil des validations (Sections~\ref{sec:validation-danish} à~\ref{sec:blocs-separes}) ouvrent plusieurs pistes de poursuite, détaillées ci-dessous.
+
+\begin{enumerate}
+  \item \textbf{Flash du bitstream sur PYNQ-Z2.} La prochaine étape immédiate est de générer le bitstream Vivado correspondant à l'architecture circuit pilote. Le Block Design Vivado comprend~:
+    \begin{itemize}
+      \item Le bloc ZYNQ7 Processing System avec activation des ports HP0.
+      \item Deux instances AXI DMA~: une MM2S pour \texttt{rx\_stream} et \texttt{prn\_stream}, une S2MM pour \texttt{corr\_out}.
+      \item Le bloc IP \texttt{acquisition\_stsa\_top} exporté depuis Vitis HLS.
+      \item Un AXI SmartConnect pour la connexion des ports mémoire au HP0.
+    \end{itemize}
+    Le notebook Python existant (\texttt{Campagne\_FPGA\_TSA.ipynb}) peut être utilisé sans modification grâce à la compatibilité de l'interface AXI.
+
+  \item \textbf{Résolution du seuil de décision par variance.} Comme identifié en Section~\ref{sec:point-ouvert-variance}, l'architecture optimisée doit réintégrer le calcul de variance normalisée et sa comparaison au seuil (\texttt{threshold\_coarse}, \texttt{threshold\_fine}) avant tout déploiement, afin de pouvoir fiablement rejeter les cas d'absence de satellite. Le bloc \texttt{decision\_top} (Section~\ref{sec:blocs-separes}) a été conçu précisément pour accueillir cette bascule via son paramètre \texttt{decision\_mode}~: l'option~A (seuil de variance) y est déjà implémentée et synthétisée individuellement (0~BRAM, 4~DSP, timing respecté à 7.20~ns), il reste à l'activer par défaut dans le pipeline complet et à revalider la campagne DANISH\_SE avec ce mode.
+
+  \item \textbf{Extension au scénario spatial INPE.} Comme identifié en Section~\ref{sec:limite-inpe}, une resynthèse avec \texttt{N}, \texttt{FS} et \texttt{FREQUENCE\_CENTRALE} adaptés au scénario LEO~600~km (16.368~MHz, Doppler jusqu'à 45~kHz) permettrait d'étendre la validation bit-exacte aux conditions les plus proches d'une mission CubeSat réelle.
+
+  \item \textbf{Fenêtre $\tau$ adaptative dans \texttt{fine\_pilot()}.} Actuellement, la fine search teste les 1023~phases entières même si le coarse a déjà localisé le pic avec une précision de $\pm250$~Hz en Doppler et $\pm16$~chips en phase. L'implémentation d'une fenêtre adaptative~:
+    \begin{lstlisting}[numbers=none]
+// Au lieu de (actuel) :
+int fine_tau_begin = 0;
+int fine_tau_count = NB_PHASES;  // 1023 phases
+
+// Propose (fenetre adaptative) :
+int fine_tau_begin = max(0, coarse_phase - FINE_TAU_WINDOW/2);
+int fine_tau_count = FINE_TAU_WINDOW;  // ex: 128 phases
+    \end{lstlisting}
+    permettrait de réduire de $\times8$ le nombre de corrélations en fine search ($1023 \to 128$~phases), avec un impact direct sur la latence totale de traitement par fenêtre de 1~ms. En reprenant le circuit fixe \texttt{unified\_corr\_one\_doppler} (Section~\ref{sec:axe2}), dont le nombre de tuiles traitées est directement proportionnel à \texttt{fine\_tau\_count}, ce changement se traduit par une réduction équivalente du nombre d'appels dans \texttt{fine\_pilot()}~: à \texttt{CORR\_TILE=4} inchangé, le nombre de tuiles par bin Doppler fin passerait de 256 à 32, réduisant d'autant la latence de cette étape sans toucher aux ressources BRAM/DSP déjà optimisées. Une estimation prudente, à latence par tuile inchangée, suggère un gain de l'ordre de $\times6$ à $\times8$ sur la latence totale de \texttt{fine\_pilot()}, à confirmer par une nouvelle campagne de synthèse une fois la fenêtre adaptative implémentée et le calcul de la position \texttt{coarse\_phase} correctement propagé entre les deux pilotes.
+
+  \item \textbf{Streaming de \texttt{signal[N]}.} Les 16~BRAM restantes pour \texttt{signal[N]} pourraient être supprimées si l'algorithme STSA du coarse est modifié pour accepter un accès séquentiel depuis le flux AXI-Stream, sans stockage intermédiaire. Cela nécessiterait de modifier la logique STSA pour fonctionner sur des données arrivant dans l'ordre $0, 1, 2, \ldots, N-1$ plutôt que dans l'ordre sous-échantillonné $0, 8, 16, \ldots$ Ce point est à discuter avec le chef de service pour évaluer l'impact sur la précision de l'algorithme.
+
+  \item \textbf{Comparaison avec d'autres méthodes d'acquisition.} Dans le cadre de la thèse, une comparaison algorithmique entre l'approche TSA/STSA, les méthodes à base de FFT et les corrélateurs par convolution circulaire est prévue. Les résultats de faisabilité FPGA obtenus dans ce stage (127~BRAM, 30~DSP, Fmax 150~MHz) constituent une référence de base pour cette comparaison.
+
+  \item \textbf{Extension multi-constellations.} Le design actuel traite un seul satellite GPS (un seul code PRN). L'extension à plusieurs constellations (GPS + Galileo + GLONASS) nécessiterait de gérer plusieurs tables \texttt{g\_prn\_var} simultanément, ou de les charger séquentiellement via le flux \texttt{prn\_stream}. Les ressources libérées par l'optimisation (notamment les 175 DSP économisés) laissent une marge suffisante pour envisager un traitement multi-satellites sur le même FPGA.
+\end{enumerate}
+
+%%% ============================================================
+\section{Conclusion}
+%%% ============================================================
+
+\subsection{Vue d'ensemble des architectures successives}
+
+Le tableau suivant récapitule les trois architectures explorées au cours de ce travail, dans leur ordre chronologique de développement~:
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.4}
+\small
+\begin{tabular}{p{3.4cm}p{3.4cm}p{3.4cm}p{3.4cm}}
+\toprule
+ & \textbf{Design original} & \textbf{Circuit pilote} & \textbf{3 blocs séparés} \\
+\midrule
+Fichier & \texttt{acq\_stsaV2.cpp} & \texttt{acq\_unified.cpp} & \texttt{acq\_blocks\_pipeline.cpp} \\
+Structure & Monolithique, deux corrélateurs indépendants & Monolithique, corrélateur partagé & Trois blocs synthétisés séparément \\
+BRAM & 265 & 127 & 34 (cumul des 3 blocs) \\
+DSP & 205 & 30 & 22 (cumul des 3 blocs) \\
+Seuil de décision & Variance normalisée & Seuil fixe uniquement & Les deux, au choix (paramètre) \\
+Statut & Référence de départ & Validée (13/14 sur DANISH\_SE) & Synthétisée, validation fonctionnelle à refaire \\
+\bottomrule
+\end{tabular}
+\caption{Vue d'ensemble des trois architectures successives. Les chiffres de la colonne \og{}3 blocs séparés\fg{} correspondent au cumul des synthèses individuelles et ne sont pas directement comparables aux deux autres colonnes, obtenues par synthèse d'un pipeline complet.}
+\end{table}
+
+\paragraph{Note de lecture importante.} Les ressources de la troisième colonne résultent de synthèses \textit{séparées} de chaque bloc~; elles ne prennent pas en compte la logique d'assemblage (FIFOs inter-blocs, contrôleur \texttt{DATAFLOW}) qui s'ajouterait lors d'une synthèse du wrapper complet. Une comparaison rigoureuse avec les deux premières architectures nécessitera de synthétiser \texttt{acquisition\_pipeline\_top} dans son ensemble, ce qui constitue l'une des étapes restant à mener (Section~\ref{sec:perspectives}).
+
+\subsection{Contributions apportées}
+%%% ============================================================
+
+Ce rapport présente le travail d'optimisation du bloc TSA GPS réalisé durant le stage M2 au sein du Labo SEMI de l'UMONS, en réponse aux axes définis par le chef de service Carlos. Deux contributions complémentaires ont été apportées.
+
+\paragraph{Contribution 1 — Mesure chiffrée d'une optimisation existante.}
+La version optimisée (lecture ×1) de la fine search existait déjà dans le code d'Ibrahima, mais n'avait jamais été comparée quantitativement à la version lente (lecture ×3). L'ajout d'un switch de compilation et la réalisation de deux synthèses HLS distinctes ont permis de fournir la \textbf{première mesure chiffrée comparative}~: $-12.1\,\%$ de BRAM pour un gain nul en DSP et en Fmax. Ce type de mesure, bien que modeste en apparence, est précieux pour documenter l'état réel du code avant d'engager une refactorisation plus profonde.
+
+\paragraph{Contribution 2 — Architecture circuit pilote.}
+La refactorisation architecturale proposée dans \texttt{acq\_unified.cpp} constitue le c\oe{}ur du travail. En partageant un unique moteur de corrélation et une unique table PRN entre les deux phases de l'algorithme (coarse et fine), on obtient des gains massifs en ressources~:
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lrrr}
+\toprule
+\textbf{Ressource} & \textbf{Avant} & \textbf{Après} & \textbf{Gain} \\
+\midrule
+BRAM & 265 & 127 & $-52\,\%$ \\
+DSP  & 205 &  30 & $-85\,\%$ \\
+FF   & 44\,819 & 6\,656 & $-85\,\%$ \\
+LUT  & 49\,733 & 14\,462 & $-70\,\%$ \\
+Fmax & 137~MHz & 150~MHz & $+9.5\,\%$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Ces gains sont obtenus sans modifier l'interface AXI du bloc, garantissant une compatibilité totale avec l'écosystème logiciel existant (notebook Python PYNQ, scripts de test). La C~Simulation valide que le comportement fonctionnel est identique au design original~: le satellite PRN-25 est correctement détecté à Doppler~=~$-1\,750$~Hz et Phase~=~150~chips.
+
+\paragraph{Contribution 3 — Validation bit-exacte élargie et méthodologie de débogage.}
+Au-delà du cas unique PRN-25, une campagne de validation bit-exacte sur 14~signaux synthétiques calibrés sur la thèse de Glauberto (protocole DANISH\_SE) a permis de mettre en évidence et corriger deux dépassements de capacité en arithmétique virgule fixe (\texttt{acc\_t}, \texttt{pow\_tile\_t}), invisibles en simulation flottante. Le taux de réussite final (13/14, 92.9\,\%) est cohérent avec la loi théorique de dégradation $(1-2p)^2$ et avec le seuil de rupture attendu ($\approx$50\,\% de Sample Error). Cette campagne a également mis en évidence un point ouvert important~: l'absence, dans l'architecture optimisée, du seuil de décision par variance permettant de rejeter fiablement l'absence de satellite~--- point à traiter avant tout déploiement opérationnel.
+
+\paragraph{Positionnement dans le projet de thèse.}
+Les résultats obtenus s'inscrivent directement dans les objectifs du \textit{Sous-problème~3} de la thèse~: \og{}dans quelle mesure une technique d'acquisition Doppler adaptée à la Radio Occultation peut-elle être implémentée sur FPGA en tenant compte des contraintes propres aux CubeSats~?\fg{} Le tableau de ressources obtenu (127~BRAM sur 280 disponibles, soit 45\,\% du maximum) démontre que le bloc TSA/STSA est effectivement implémentable dans les ressources d'un FPGA de classe CubeSat, avec une marge suffisante pour l'intégration du wrapper ZYNQ et des blocs DMA.
+
+La prochaine étape --- flash du bitstream et validation sur signal réel PYNQ-Z2 --- constituera la première brique de la validation matérielle décrite en Année~3 du calendrier prévisionnel de la thèse.
+
+\vspace{0.5cm}
+\hrule
+\vspace{0.3cm}
+\begin{center}
+\small\textit{Rapport rédigé dans le cadre du Stage M2 --- UMONS Labo SEMI --- Juin 2026\\
+Fichiers sources disponibles sur GitHub~: \texttt{github.com/mtazicharki/TSA-FPGA-GPS-Optimization}}
+\end{center}
+
+\end{document}

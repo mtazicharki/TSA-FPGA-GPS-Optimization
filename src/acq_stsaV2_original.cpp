@@ -697,6 +697,70 @@ void insert_peak(
 // ========== DDS MIX ==========
 // Mélangeur numérique (DDS) : multiplie chaque échantillon du signal par
 // cos(-ω_c·n) et sin(-ω_c·n) pour ramener le signal en bande de base complexe.
+// ============================================================
+// DDS PARTAGÉ — une seule instance BRAM pour coarse ET fine
+//
+// Remplace les deux DDS séparés :
+//   - fine_mix_to_mem()  : boucle MIX_LOOP (pas = phase_inc × 1)
+//   - coarse MIX_SUB_PASS : boucle inline  (pas = phase_inc × PRECISION)
+//
+// #pragma HLS INLINE off : HLS génère UN SEUL bloc matériel
+// -> une seule BRAM pour DDS_COS_LUT et DDS_SIN_LUT
+//
+// Paramètres :
+//   signal[]    : signal GPS d'entrée
+//   indices[]   : indices des échantillons à traiter
+//   n_count     : nombre d'échantillons
+//   phase_init  : phase initiale de l'accumulateur
+//                 fine   : 0
+//                 coarse : phase_inc * pass
+//   phase_step  : incrément entre deux échantillons consécutifs
+//                 fine   : phase_inc * 1
+//                 coarse : phase_inc * PRECISION (= phase_inc * 8)
+//   out_i[]     : composante I en sortie
+//   out_q[]     : composante Q en sortie
+// ============================================================
+static void dds_mix_shared(
+    const sample_t  signal[N],
+    const int       indices[],
+    int             n_count,
+    dds_phase_u_t   phase_init,
+    dds_phase_u_t   phase_step,
+    sample_t        out_i[],
+    sample_t        out_q[]
+) {
+#pragma HLS INLINE off
+#pragma HLS DEPENDENCE variable=out_i inter false
+#pragma HLS DEPENDENCE variable=out_q inter false
+
+    dds_phase_u_t phase_acc = phase_init;
+
+    DDS_SHARED_LOOP: for (int k = 0; k < n_count; k++) {
+#pragma HLS PIPELINE II=1
+#pragma HLS DEPENDENCE variable=out_i inter false
+#pragma HLS DEPENDENCE variable=out_q inter false
+
+        unsigned lut_idx = dds_lut_index(phase_acc);
+        // Lecture unique de la LUT partagée (une seule BRAM)
+        trig_t c = DDS_COS_LUT[lut_idx];
+        trig_t s = DDS_SIN_LUT[lut_idx];
+
+        sample_t x  = signal[indices[k]];
+        sample_t xc = x * c;
+        sample_t xs = x * s;
+#pragma HLS BIND_OP variable=xc op=mul impl=dsp latency=3
+#pragma HLS BIND_OP variable=xs op=mul impl=dsp latency=3
+
+        out_i[k] = xc;
+        out_q[k] = -xs;
+
+        // Avancement de l'accumulateur avec le pas correct
+        // fine   : phase_step = phase_inc × 1
+        // coarse : phase_step = phase_inc × PRECISION
+        phase_acc = (dds_phase_u_t)(phase_acc + phase_step);
+    }
+}
+
 // Les composantes I et Q sont stockées en BRAM pour être relues par les
 // corrélateurs de la fine search (réutilisation pour toutes les phases τ).
 static void fine_mix_to_mem(
@@ -707,85 +771,25 @@ static void fine_mix_to_mem(
 ) {
 #pragma HLS INLINE off
 
-    dds_phase_t phase_inc = hz_to_phase_inc(fd);
-    // Accumulateur de phase initialisé à 0 : le DDS démarre en phase nulle
-    // pour chaque appel (indépendance entre bins Doppler).
-    dds_phase_u_t phase_acc = 0;
+    dds_phase_t   phase_inc  = hz_to_phase_inc(fd);
+    // Phase initiale = 0 : la fine démarre toujours à phase nulle
+    dds_phase_u_t phase_init = 0;
+    // Pas = phase_inc × 1 : tous les échantillons consécutifs
+    dds_phase_u_t phase_step = (dds_phase_u_t)phase_inc;
 
-    MIX_LOOP: for (int n = 0; n < N; n++) {
+    // Indices séquentiels 0..N-1 pour la fine
+    static int fine_indices[N];
+    FINE_IDX_LOOP: for (int n = 0; n < N; n++) {
 #pragma HLS PIPELINE II=1
-        // DEPENDENCE inter false : l'outil HLS ne peut pas prouver seul que
-        // mix_i[n] et mix_q[n] n'ont pas de dépendance inter-itération
-        // (alias possible via pointeur). On lui garantit que chaque itération
-        // écrit une adresse distincte (accès séquentiel pur).
-#pragma HLS DEPENDENCE variable=mix_i inter false
-#pragma HLS DEPENDENCE variable=mix_q inter false
-        // Extraction des STSA_DDS_LUT_BITS MSB de l'accumulateur : index LUT uniforme.
-        unsigned lut_idx = dds_lut_index(phase_acc);
-        trig_t c = DDS_COS_LUT[lut_idx];
-        trig_t s = DDS_SIN_LUT[lut_idx];
-
-        sample_t x  = signal[n];
-        // Multiplications forcées sur DSP (latency=3) : évite l'implémentation
-        // en LUT qui consommerait ~8× plus de ressources pour des multipliants larges.
-        sample_t xc = x * c;
-        sample_t xs = x * s;
-#pragma HLS BIND_OP variable=xc op=mul impl=dsp latency=3
-#pragma HLS BIND_OP variable=xs op=mul impl=dsp latency=3
-        mix_i[n] = xc;
-        // Signe négatif : convention de dérotation (e^{-jωt} = cos - j·sin).
-        mix_q[n] = -xs;
-
-        // Avancement de l'accumulateur de phase : addition modulo 2^32 par débordement
-        // naturel de l'arithmétique non-signée (wrap-around = modulo gratuit).
-        phase_acc = (dds_phase_u_t)(phase_acc + (dds_phase_u_t)phase_inc);
+        fine_indices[n] = n;
     }
+
+    // Appel DDS partagé — même BRAM LUT que la coarse
+    // phase_step = phase_inc × 1 (pas de sous-échantillonnage)
+    dds_mix_shared(signal, fine_indices, N,
+                   phase_init, phase_step,
+                   mix_i, mix_q);
 }
-
-// [BRANCHEMENT TEST CARLOS/TAZI] Version STREAMING de fine_mix_to_mem.
-// Identique a fine_mix_to_mem() mais lit le signal DEPUIS LE FLUX AXI-Stream
-// plutot que depuis le buffer BRAM signal[N].
-// Consequence : signal[N] n'existe plus sur le FPGA pour la fine search.
-// Contrepartie : rx_stream doit etre relu depuis sa source (DMA/processeur)
-// a CHAQUE appel (une fois par bin Doppler, soit fine_doppler_count fois).
-// Activee uniquement quand #define STSA_USE_FINE_STREAMING est present dans
-// acq_stsaV2.h.
-#ifdef STSA_USE_FINE_STREAMING
-static void fine_mix_streaming(
-    hls::stream<axis_t> &rx_stream,
-    sample_t mix_i[N],
-    sample_t mix_q[N],
-    doppler_t fd
-) {
-#pragma HLS INLINE off
-
-    dds_phase_t phase_inc = hz_to_phase_inc(fd);
-    dds_phase_u_t phase_acc = 0;
-
-    MIX_STREAM_LOOP: for (int n = 0; n < N; n++) {
-#pragma HLS PIPELINE II=1
-#pragma HLS DEPENDENCE variable=mix_i inter false
-#pragma HLS DEPENDENCE variable=mix_q inter false
-        unsigned lut_idx = dds_lut_index(phase_acc);
-        trig_t c = DDS_COS_LUT[lut_idx];
-        trig_t s = DDS_SIN_LUT[lut_idx];
-
-        // [STREAMING] Lecture depuis le flux AXI au lieu du buffer BRAM signal[N].
-        // L'echantillon est consomme ici et n'est jamais stocke dans signal[N].
-        axis_t rx_val = rx_stream.read();
-        sample_t x = (sample_t)rx_val.data;
-
-        sample_t xc = x * c;
-        sample_t xs = x * s;
-#pragma HLS BIND_OP variable=xc op=mul impl=dsp latency=3
-#pragma HLS BIND_OP variable=xs op=mul impl=dsp latency=3
-        mix_i[n] = xc;
-        mix_q[n] = -xs;
-
-        phase_acc = (dds_phase_u_t)(phase_acc + (dds_phase_u_t)phase_inc);
-    }
-}
-#endif  // STSA_USE_FINE_STREAMING
 
 // ========== PRN TABLES ==========
 // Précalcule l'indice de début de chaque phase τ dans le tableau signal[].
@@ -1093,11 +1097,7 @@ static void process_all_variants_all_tau(
 // effectue le mélange DDS puis corrèle les 3 variantes sur toutes les phases.
 // Les puissances sont empilées dans pow_s dans l'ordre (doppler, tuile, variante).
 static void produce_fine_powers(
-#ifdef STSA_USE_FINE_STREAMING
-    hls::stream<axis_t> &rx_stream,
-#else
     const sample_t signal[N],
-#endif
     const prn_sign_t prn_banks[PRN_VARIANTS][FINE_TAU_TILE][2 * N],
     const int tau_start_tbl[NB_PHASES],
     const doppler_t doppler_offsets_abs[NB_DOPPLER_FINE],
@@ -1108,26 +1108,29 @@ static void produce_fine_powers(
 ) {
 #pragma HLS INLINE off
 
+    // Buffers de sortie du mélangeur : réutilisés pour chaque bin Doppler.
+    // Partition cyclique factor=2 : divise le tableau en 2 banques interleaved,
+    // permettant deux accès simultanés en lecture depuis process_all_variants_all_tau
+    // sans conflit de port BRAM (utile quand SAMPLE_LOOP lit bi et bq en même cycle).
     sample_t mix_i[N];
     sample_t mix_q[N];
 #pragma HLS ARRAY_PARTITION variable=mix_i cyclic factor=2 dim=1
 #pragma HLS ARRAY_PARTITION variable=mix_q cyclic factor=2 dim=1
+// ram_1p impl=bram latency=2 : un seul port de lecture, latence 2 cycles.
+// Compromis : ram_2p permettrait 2 accès/cycle mais doublerait la surface BRAM.
 #pragma HLS BIND_STORAGE variable=mix_i type=ram_1p impl=bram latency=2
 #pragma HLS BIND_STORAGE variable=mix_q type=ram_1p impl=bram latency=2
 
+    // Boucle séquentielle sur les bins Doppler : le mélange doit être complet
+    // avant de démarrer la corrélation (pas de DATAFLOW ici, mix_i/mix_q partagés).
     DOPPLER_LOOP: for (int d = 0; d < fine_doppler_count; d++) {
 #pragma HLS LOOP_TRIPCOUNT min=7 max=21
         doppler_t fd = doppler_offsets_abs[d];
 
-#ifdef STSA_USE_FINE_STREAMING
-        // [STREAMING] Le signal est lu depuis rx_stream a chaque bin Doppler.
-        // rx_stream doit etre refourni depuis la source (DMA/processeur) a chaque
-        // iteration -- fine_doppler_count flux complets sont necessaires.
-        fine_mix_streaming(rx_stream, mix_i, mix_q, fd);
-#else
-        // [BUFFER - defaut] Le signal est lu depuis le buffer BRAM signal[N].
+        // Étape 1 : remplissage des buffers mix_i / mix_q pour ce bin Doppler.
         fine_mix_to_mem(signal, mix_i, mix_q, fd);
-#endif
+        // Étape 2 : corrélation des 3 variantes sur fine_tau_count phases,
+        // résultats poussés dans pow_s pour consommation par reduce_fine_stream_core.
         process_all_variants_all_tau(mix_i, mix_q, prn_banks, tau_start_tbl, fine_tau_begin, fine_tau_count, fd, pow_s);
     }
 }
@@ -1371,11 +1374,7 @@ static void consume_fine_maxima_and_insert(
 // produce_fine_powers et reduce_fine_stream_core s'exécutent en recouvrement
 // dès que pow_s contient au moins un paquet (profondeur=64 = compromis latence/BRAM).
 static void run_fine_dataflow_core(
-#ifdef STSA_USE_FINE_STREAMING
-    hls::stream<axis_t> &rx_stream,
-#else
     const sample_t signal[N],
-#endif
     const prn_sign_t prn_banks[PRN_VARIANTS][FINE_TAU_TILE][2 * N],
     const int tau_start_tbl[NB_PHASES],
     const doppler_t doppler_offsets_abs[NB_DOPPLER_FINE],
@@ -1390,23 +1389,32 @@ static void run_fine_dataflow_core(
 ) {
 #pragma HLS INLINE off
 
+    // pow_s : FIFO de puissances élémentaires (profondeur 64, SRL pour économiser BRAM).
+    //         Producteur : produce_fine_powers. Consommateur : reduce_fine_stream_core.
     hls::stream<fine_pow_pkt_t> pow_s;
+    // max_s : FIFO des maxima par variante et par Doppler (profondeur 32).
+    //         Producteur : reduce_fine_stream_core. Consommateur : consume_fine_maxima_and_insert.
     hls::stream<fine_max_pkt_t> max_s;
+    // corr_pkt_s : FIFO large (profondeur 2048) pour absorber le débit de la surface
+    //              de corrélation complète entre reduce et write_corr_out_stream.
+    //              Taille fixée pour que reduce ne se bloque pas sur l'écriture AXIS.
     hls::stream<corr_pkt_t> corr_pkt_s;
+    // stats_s : FIFO de 2 entrées suffisante (1 seul paquet émis en fin de traitement).
     hls::stream<fine_stats_pkt_t> stats_s;
 #pragma HLS STREAM variable=pow_s depth=64
 #pragma HLS STREAM variable=max_s depth=32
 #pragma HLS STREAM variable=corr_pkt_s depth=2048
 #pragma HLS STREAM variable=stats_s depth=2
+// SRL (Shift Register LUT) : implémentation FIFO en registres à décalage,
+// économique pour les petites FIFO (≤64 entrées) vs BRAM.
 #pragma HLS BIND_STORAGE variable=pow_s type=FIFO impl=SRL
 #pragma HLS BIND_STORAGE variable=max_s type=FIFO impl=SRL
+// DATAFLOW : les 5 fonctions ci-dessous s'exécutent en pipeline de tâches.
+// Chaque fonction démarre dès que sa FIFO d'entrée contient des données,
+// sans attendre que la fonction précédente soit complètement terminée.
 #pragma HLS DATAFLOW
 
-#ifdef STSA_USE_FINE_STREAMING
-    produce_fine_powers(rx_stream, prn_banks, tau_start_tbl, doppler_offsets_abs, fine_tau_begin, fine_tau_count, fine_doppler_count, pow_s);
-#else
     produce_fine_powers(signal, prn_banks, tau_start_tbl, doppler_offsets_abs, fine_tau_begin, fine_tau_count, fine_doppler_count, pow_s);
-#endif
     reduce_fine_stream_core(pow_s, max_s, corr_pkt_s, fine_tau_count, fine_doppler_count, stats_s);
     write_corr_out_stream(corr_pkt_s, fine_tau_count, fine_doppler_count, corr_out);
     consume_fine_maxima_and_insert(max_s, fine_doppler_count, ListOfPeaksFS_local, num_peaks_fs_local);
@@ -1418,11 +1426,7 @@ static void run_fine_dataflow_core(
 // Isole la région DATAFLOW et évite que Vitis HLS ne tente de fusionner
 // les boucles extérieures de fine_search avec le pipeline interne.
 static void run_fine_dataflow_region(
-#ifdef STSA_USE_FINE_STREAMING
-    hls::stream<axis_t> &rx_stream,
-#else
     const sample_t signal[N],
-#endif
     const prn_sign_t prn_banks[PRN_VARIANTS][FINE_TAU_TILE][2 * N],
     const int tau_start_tbl[NB_PHASES],
     const doppler_t doppler_offsets_abs[NB_DOPPLER_FINE],
@@ -1438,11 +1442,7 @@ static void run_fine_dataflow_region(
 #pragma HLS INLINE off
 
     run_fine_dataflow_core(
-#ifdef STSA_USE_FINE_STREAMING
-        rx_stream,
-#else
         signal,
-#endif
         prn_banks,
         tau_start_tbl,
         doppler_offsets_abs,
@@ -1495,21 +1495,18 @@ static void coarse_compute_doppler_peaks(
         sample_t mix_q[N / PRECISION + 1];
         int mix_n[N / PRECISION + 1];
 
-        // Mélange DDS du sous-ensemble d'échantillons du pass courant.
-        // On n'opère que sur les M indices stockés dans stsa_indices[pass].
-        MIX_SUB_PASS: for(int i = 0; i < M; i++) {
+        // Remplir mix_n avec les indices du pass courant
+        FILL_MIX_N: for (int i = 0; i < M; i++) {
 #pragma HLS PIPELINE II=1
-            int n = stsa_indices[pass][i];
-            unsigned lut_idx = dds_lut_index(phase_acc);
-            trig_t c = DDS_COS_LUT[lut_idx];
-            trig_t s = DDS_SIN_LUT[lut_idx];
-            sample_t x = signal[n];
-
-            mix_i[i] = x * c;
-            mix_q[i] = -(x * s);
-            mix_n[i] = n;
-            phase_acc = (dds_phase_u_t)(phase_acc + phase_step);
+            mix_n[i] = stsa_indices[pass][i];
         }
+
+        // Appel DDS partagé pour ce pass coarse
+        // phase_init = phase_inc * pass (alignement de phase correct)
+        // phase_step = phase_inc * PRECISION (sous-échantillonnage × 8)
+        dds_mix_shared(signal, mix_n, M,
+                       phase_acc, phase_step,
+                       mix_i, mix_q);
 
         // Accumulation incrémentale sur toutes les phases τ : lecture de l'accumulateur
         // persistant, ajout de la contribution du pass, puis réécriture et calcul de puissance.
@@ -2285,11 +2282,7 @@ void coarse_search(
 // proportionnellement à la confiance coarse (coarse_var_in / threshold_coarse_in).
 // Plus la coarse est confiante, plus la fine est étroite → latence réduite.
 void fine_search(
-#ifdef STSA_USE_FINE_STREAMING
-    hls::stream<axis_t> &rx_stream,
-#else
     const sample_t signal[N],
-#endif
     const prn_sign_t prn_banks[PRN_VARIANTS][FINE_TAU_TILE][2 * N],
     const int tau_start_tbl[NB_PHASES],
     doppler_t doppler_coarse,
@@ -2387,11 +2380,7 @@ void fine_search(
     // À la sortie, ListOfPeaksFS[v] contient le top-MAX_NUM_PEAKS_FS des pics
     // de la variante v, et max_power / sum_power contiennent les statistiques globales.
     run_fine_dataflow_region(
-#ifdef STSA_USE_FINE_STREAMING
-        rx_stream,
-#else
         signal,
-#endif
         prn_banks,
         tau_start_tbl,
         doppler_offsets_abs,
@@ -2709,11 +2698,6 @@ void acquisition_stsa(
     // Buffers RAM locaux pour le signal reçu et le PRN brut.
     // Déclarés en variables locales (pas static) : alloués en BRAM dédiée,
     // réinitialisés implicitement à chaque appel de la fonction.
-    // Note : dans la version STREAMING, signal[N] est toujours necessaire pour
-    // le COARSE search (acces non-sequentiel, voir documentation). Seule la FINE
-    // search passe en streaming (fine_search relit rx_stream directement).
-    // Le gain en BRAM vient de la suppression du buffer mix_i[N]/mix_q[N]
-    // dans fine_mix_to_mem, pas de signal[N] lui-meme.
     sample_t signal[N];
     sample_t prn[N];
 
@@ -2739,9 +2723,6 @@ void acquisition_stsa(
 #endif
 
     // Transfert des N échantillons depuis les flux AXIS vers les tableaux RAM locaux.
-    // Signal capture pour le coarse search (dans les deux versions).
-    // Dans la version STREAMING, rx_stream sera relu depuis sa source (DMA/PS)
-    // par fine_search apres que le coarse search ait termine.
     capture_inputs_to_mem_stsa(rx_stream, prn_stream, signal, prn);
 
 #ifndef __SYNTHESIS__
@@ -2835,11 +2816,7 @@ void acquisition_stsa(
     // doppler_out / phase_out / peak_out sont mis à jour en place si la fine détecte.
     // fine_doppler_count et fine_tau_count sont retournés pour calculer mean_power.
     fine_search(
-#ifdef STSA_USE_FINE_STREAMING
-        rx_stream,
-#else
         signal,
-#endif
         prn_banks,
         tau_start_tbl,
         (doppler_t)doppler_out,

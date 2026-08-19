@@ -1,0 +1,270 @@
+{
+  "DANISH_SE": [
+    {
+      "file": "DANISH_SE/danish_se_00_SE00.0pct.bin",
+      "prn": 1,
+      "fs_hz": 11999000.0,
+      "if_hz": 3563000.0,
+      "adc_bits": 1,
+      "doppler_hz": 3000.0,
+      "duration_ms": 1.0,
+      "sample_error_pct": 0.0,
+      "n_samples": 11999
+    },
+    {
+      "file": "DANISH_SE/danish_se_01_SE03.7pct.bin",
+      "prn": 1,
+      "fs_hz": 11999000.0,
+      "if_hz": 3563000.0,
+      "adc_bits": 1,
+      "doppler_hz": 3000.0,
+      "duration_ms": 1.0,
+      "sample_error_pct": 3.6923076923076925,
+      "n_samples": 11999
+    },
+    {
+      "file": "DANISH_SE/danish_se_02_SE07.4pct.bin",
+      "prn": 1,
+      "fs_hz": 11999000.0,
+      "if_hz": 3563000.0,
+      "adc_bits": 1,
+      "doppler_hz": 3000.0,
+      "duration_ms": 1.0,
+      "sample_error_pct": 7.384615384615385,
+      "n_samples": 11999
+    },
+    {
+      "file": "DANISH_SE/danish_se_03_SE11.1pct.bin",
+      "prn": 1,
+      "fs_hz": 11999000.0,
+      "if_hz": 3563000.0,
+      "adc_bits": 1,
+      "doppler_hz": 3000.0,
+      "duration_ms": 1.0,
+      "sample_error_pct": 11.076923076923077,
+      "n_samples": 11999
+    },
+    {
+      "file": "DANISH_SE/danish_se_04_SE14.8pct.bin",
+      "prn": 1,
+      "fs_hz": 11999000.0,
+      "if_hz": 3563000.0,
+      "adc_bits": 1,
+      "doppler_hz": 3000.0,
+      "duration_ms": 1.0,
+      "sample_error_pct": 14.76923076923077,
+      "n_samples": 11999
+    },
+    {
+      "file": "DANISH_SE/danish_se_05_SE18.5pct.bin",
+      "prn": 1,
+      "fs_hz": 11999000.0,
+      "if_hz": 3563000.0,
+      "adc_bits": 1,
+      "doppler_hz": 3000.0,
+      "duration_ms": 1.0,
+      "sample_error_pct": 18.461538461538463,
+      "n_samples": 11999
+    },
+    {
+      "file": "DANISH_SE/danish_se_06_SE22.2pct.bin",
+      "prn": 1,
+      "fs_hz": 11999000.0,
+      "if_hz": 3563000.0,
+      "adc_bits": 1,
+      "doppler_hz": 3000.0,
+      "duration_ms": 1.0,
+      "sample_error_pct": 22.153846153846153,
+      "n_samples": 11999
+    },
+    {
+      "file": "DANISH_SE/danish_se_07_SE25.8pct.bin",
+      "prn": 1,
+      "fs_hz": 11999000.0,
+      "if_hz": 3563000.0,
+      "adc_bits": 1,
+      "doppler_hz": 3000.0,
+      "duration_ms": 1.0,
+      "sample_error_pct": 25.846153846153847,
+      "n_samples": 11999
+    },
+    {
+      "file": "DANISH_SE/danish_se_08_SE29.5pct.bin",
+      "prn": 1,
+      "fs_hz": 11999000.0,
+      "if_hz": 3563000.0,
+      "adc_bits": 1,
+      "doppler_hz": 3000.0,
+      "duration_ms": 1.0,
+      "sample_error_pct": 29.53846153846154,
+      "n_samples": 11999
+    },
+    {
+      "file": "DANISH_SE/danish_se_09_SE33.2pct.bin",
+      "prn": 1,
+      "fs_hz": 11999000.0,
+      "if_hz": 3563000.0,
+      "adc_bits": 1,
+      "doppler_hz": 3000.0,
+      "duration_ms": 1.0,
+      "sample_error_pct": 33.23076923076923,
+      "n_samples": 11999
+    },
+    {
+      "file": "DANISH_SE/danish_se_10_SE36.9pct.bin",
+      "prn": 1,
+      "fs_hz": 11999000.0,
+      "if_hz": 3563000.0,
+      "adc_bits": 1,
+      "doppler_hz": 3000.0,
+      "duration_ms": 1.0,
+      "sample_error_pct": 36.92307692307693,
+      "n_samples": 11999
+    },
+    {
+      "file": "DANISH_SE/danish_se_11_SE40.6pct.bin",
+      "prn": 1,
+      "fs_hz": 11999000.0,
+      "if_hz": 3563000.0,
+      "adc_bits": 1,
+      "doppler_hz": 3000.0,
+      "duration_ms": 1.0,
+      "sample_error_pct": 40.61538461538462,
+      "n_samples": 11999
+    },
+    {
+      "file": "DANISH_SE/danish_se_12_SE44.3pct.bin",
+      "prn": 1,
+      "fs_hz": 11999000.0,
+      "if_hz": 3563000.0,
+      "adc_bits": 1,
+      "doppler_hz": 3000.0,
+      "duration_ms": 1.0,
+      "sample_error_pct": 44.30769230769231,
+      "n_samples": 11999
+    },
+    {
+      "file": "DANISH_SE/danish_se_13_SE48.0pct.bin",
+      "prn": 1,
+      "fs_hz": 11999000.0,
+      "if_hz": 3563000.0,
+      "adc_bits": 1,
+      "doppler_hz": 3000.0,
+      "duration_ms": 1.0,
+      "sample_error_pct": 48.0,
+      "n_samples": 11999
+    }
+  ],
+  "INPE": [
+    {
+      "file": "INPE/inpe_00_SNR00dB.bin",
+      "prn": 23,
+      "fs_hz": 16368000.0,
+      "if_hz": 4092000.0,
+      "adc_bits": 2,
+      "doppler_hz": 42500.0,
+      "duration_ms": 1.0,
+      "snr_db": 0,
+      "n_samples": 16368
+    },
+    {
+      "file": "INPE/inpe_01_SNR02dB.bin",
+      "prn": 23,
+      "fs_hz": 16368000.0,
+      "if_hz": 4092000.0,
+      "adc_bits": 2,
+      "doppler_hz": 42500.0,
+      "duration_ms": 1.0,
+      "snr_db": 2,
+      "n_samples": 16368
+    },
+    {
+      "file": "INPE/inpe_02_SNR04dB.bin",
+      "prn": 23,
+      "fs_hz": 16368000.0,
+      "if_hz": 4092000.0,
+      "adc_bits": 2,
+      "doppler_hz": 42500.0,
+      "duration_ms": 1.0,
+      "snr_db": 4,
+      "n_samples": 16368
+    },
+    {
+      "file": "INPE/inpe_03_SNR06dB.bin",
+      "prn": 23,
+      "fs_hz": 16368000.0,
+      "if_hz": 4092000.0,
+      "adc_bits": 2,
+      "doppler_hz": 42500.0,
+      "duration_ms": 1.0,
+      "snr_db": 6,
+      "n_samples": 16368
+    },
+    {
+      "file": "INPE/inpe_04_SNR08dB.bin",
+      "prn": 23,
+      "fs_hz": 16368000.0,
+      "if_hz": 4092000.0,
+      "adc_bits": 2,
+      "doppler_hz": 42500.0,
+      "duration_ms": 1.0,
+      "snr_db": 8,
+      "n_samples": 16368
+    },
+    {
+      "file": "INPE/inpe_05_SNR10dB.bin",
+      "prn": 23,
+      "fs_hz": 16368000.0,
+      "if_hz": 4092000.0,
+      "adc_bits": 2,
+      "doppler_hz": 42500.0,
+      "duration_ms": 1.0,
+      "snr_db": 10,
+      "n_samples": 16368
+    },
+    {
+      "file": "INPE/inpe_06_SNR12dB.bin",
+      "prn": 23,
+      "fs_hz": 16368000.0,
+      "if_hz": 4092000.0,
+      "adc_bits": 2,
+      "doppler_hz": 42500.0,
+      "duration_ms": 1.0,
+      "snr_db": 12,
+      "n_samples": 16368
+    },
+    {
+      "file": "INPE/inpe_07_SNR14dB.bin",
+      "prn": 23,
+      "fs_hz": 16368000.0,
+      "if_hz": 4092000.0,
+      "adc_bits": 2,
+      "doppler_hz": 42500.0,
+      "duration_ms": 1.0,
+      "snr_db": 14,
+      "n_samples": 16368
+    },
+    {
+      "file": "INPE/inpe_08_SNR16dB.bin",
+      "prn": 23,
+      "fs_hz": 16368000.0,
+      "if_hz": 4092000.0,
+      "adc_bits": 2,
+      "doppler_hz": 42500.0,
+      "duration_ms": 1.0,
+      "snr_db": 16,
+      "n_samples": 16368
+    },
+    {
+      "file": "INPE/inpe_09_SNR18dB.bin",
+      "prn": 23,
+      "fs_hz": 16368000.0,
+      "if_hz": 4092000.0,
+      "adc_bits": 2,
+      "doppler_hz": 42500.0,
+      "duration_ms": 1.0,
+      "snr_db": 18,
+      "n_samples": 16368
+    }
+  ]
+}

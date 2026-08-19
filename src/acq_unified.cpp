@@ -1,22 +1,5 @@
 //==============================================================================
 // acq_unified.cpp
-// Architecture "circuit pilote" : un seul moteur de corrélation
-// partagé entre coarse search et fine search, piloté par un contrôleur séparé.
-//
-// PRINCIPE :
-//   - CIRCUIT FIXE  : unified_corr_one_doppler() -- calcule la corrélation
-//                     signal x PRN pour 1 bin Doppler x toutes les phases tau
-//                     demandées. Ne change jamais.
-//   - CIRCUIT PILOTE: coarse_pilot() et fine_pilot() -- appellent le circuit
-//                     fixe avec les bons paramètres (plage Doppler, pas, tau).
-//
-// 
-//   - prn_banks[3][16][2N] (= ~100 BRAM) disparaît complètement.
-//   - Remplacé par g_prn_var[3][2N] (= 6 BRAM) -- les variantes calculées
-//     à la volée depuis g_prn_var, sans duplication FINE_TAU_TILE.
-//   - La corrélation traite 1 tuile de tau à la fois (TILE=4 registres),
-//     sans dupliquer prn en BRAM : les accès séquentiels sont gérés
-//     par le pipeline HLS.
 //==============================================================================
 #include "acq_stsaV2.h"
 #include "dds_lut_rom.h"
@@ -24,18 +7,14 @@
 #include <iostream>
 #endif
 
-// ============================================================
-// DÉFINITIONS COMMUNES (depuis acq_stsaV2.cpp)
-// ============================================================
 static const int STSA_DDS_LUT_BITS   = 10;
 static const int STSA_DDS_PHASE_BITS = 32;
 static const int STSA_FS_HZ          = 11999000;
 static const int STSA_FC_HZ          = 3563000;
 static const int PRN_VARIANTS        = 3;
-static const int CORR_TILE           = 16;  // [TEST TILE=16] meme parallelisme que l'original
+static const int CORR_TILE           = 4;
 static const int COARSE_TOPK         = 16;
 
-// Types conditionnels selon mode synthèse ou simulation.
 #if defined(__SYNTHESIS__) && !defined(__INTELLISENSE__)
 typedef ap_uint<2> variant_t;
 typedef ap_uint<1> prn_sign_t;
@@ -71,21 +50,9 @@ static inline prn_sign_t to_prn_sign(sample_t x) {
     return (x >= (sample_t)0) ? (prn_sign_t)1 : (prn_sign_t)0;
 }
 
-// ============================================================
-// TABLES PRN PARTAGÉES (beaucoup plus petites que prn_banks)
-// ============================================================
-// g_prn_var[3][2*N] : les 3 variantes PRN (nominal, +½ chip, -½ chip),
-// dupliquées sur 2N pour éviter le modulo dans les corrélateurs.
-// Taille : 3 * 2 * 11999 * 1 bit = ~9 KB → quelques BRAM seulement.
-// Comparé à prn_banks[3][16][2*N] = 3*16*24KB = 1.15 MB (~100 BRAM).
 static prn_sign_t g_prn_var[PRN_VARIANTS][2 * N];
-
-// Table de départ tau (partagée coarse/fine, identique à l'original).
 static int g_tau_start_tbl[NB_PHASES];
 
-// ============================================================
-// INITIALISATION DES TABLES (identique à l'original)
-// ============================================================
 static void init_prn_var(const sample_t prn[N]) {
 #pragma HLS INLINE off
     INIT_BASE: for (int i = 0; i < N; i++) {
@@ -115,22 +82,6 @@ static void init_tau_start_tbl() {
     }
 }
 
-// ============================================================
-// CIRCUIT FIXE — moteur de corrélation unifié
-// ============================================================
-// Calcule la corrélation signal x PRN pour :
-//   - 1 bin Doppler (fd)
-//   - Une plage de tau [tau_begin, tau_begin + tau_count)
-//   - variant : quelle variante PRN utiliser (0=nominal, 1=+½, 2=-½)
-//   - accumulate : si true, ajoute aux accumulateurs existants
-//     (mode COARSE multi-passes) ; si false, repart de zéro
-//     (mode FINE, 1 seule passe par bin Doppler)
-//
-// Le signal est lu depuis mix_i/mix_q (pré-mélangés DDS) :
-//   - En mode COARSE : mix calculé sur sous-ensemble (STSA)
-//   - En mode FINE   : mix calculé sur N échantillons complets
-//
-// Résultats émis dans pow_stream : 1 paquet par tau traité.
 struct corr_pkt_unified_t {
     peak_power_t power;
     int tau;
@@ -140,20 +91,18 @@ struct corr_pkt_unified_t {
 static void unified_corr_one_doppler(
     const sample_t mix_i[N],
     const sample_t mix_q[N],
-    int n_samples,                    // nombre d'échantillons valides dans mix_i/q
-    const int mix_indices[N],         // indices originaux (pour accès prn avec décalage)
+    int n_samples,
+    const int mix_indices[N],
     int tau_begin,
     int tau_count,
-    int variant,                      // 0, 1 ou 2
+    int variant,
     doppler_t fd,
-    acc_t accI_buf[NB_PHASES],        // accumulateurs persistants (COARSE multi-passes)
-    acc_t accQ_buf[NB_PHASES],        // idem
-    bool accumulate,                  // true=ajoute, false=repart de zéro
+    acc_t accI_buf[NB_PHASES],
+    acc_t accQ_buf[NB_PHASES],
+    bool accumulate,
     hls::stream<corr_pkt_unified_t> &pow_s
 ) {
 #pragma HLS INLINE off
-// [TEST TILE=16] Partition cyclique de g_prn_var avec facteur 16 :
-// permet 16 acces simultanees dans UNIFIED_TILE_LOOP (UNROLL complet).
 #pragma HLS ARRAY_PARTITION variable=g_prn_var cyclic factor=16 dim=2
 
     UNIFIED_TAU_TILE_LOOP: for (int t = 0; t < tau_count; t += CORR_TILE) {
@@ -164,7 +113,6 @@ static void unified_corr_one_doppler(
 #pragma HLS ARRAY_PARTITION variable=accI complete dim=1
 #pragma HLS ARRAY_PARTITION variable=accQ complete dim=1
 
-        // Initialisation : reprise des accumulateurs existants ou remise à zéro.
         INIT_TILE: for (int k = 0; k < CORR_TILE; k++) {
 #pragma HLS UNROLL
             int tau = t + k + tau_begin;
@@ -177,11 +125,6 @@ static void unified_corr_one_doppler(
             }
         }
 
-        // Boucle principale : accumulation pour les CORR_TILE tau simultanément.
-        // mix_i/mix_q sont lus séquentiellement (1 accès/cycle).
-        // prn_var est lu avec CORR_TILE accès simultanés à des offsets différents
-        // (tau_start_tbl[tau0..tau3] + n) -- accès à la même banque BRAM mais
-        // adresses différentes, ce qui est géré par le pipeline II=1 + ram_2p.
         UNIFIED_SAMPLE_LOOP: for (int i = 0; i < n_samples; i++) {
 #pragma HLS PIPELINE II=1
             sample_t bi = mix_i[i];
@@ -204,7 +147,6 @@ static void unified_corr_one_doppler(
             }
         }
 
-        // Sauvegarde des accumulateurs et émission des puissances.
         WRITE_TILE: for (int k = 0; k < CORR_TILE; k++) {
 #pragma HLS PIPELINE II=1
             int tau = t + k + tau_begin;
@@ -223,12 +165,6 @@ static void unified_corr_one_doppler(
     }
 }
 
-// ============================================================
-// CIRCUIT PILOTE COARSE — orchestre le moteur pour la coarse search
-// ============================================================
-//   - utilise unified_corr_one_doppler() au lieu de coarse_compute_doppler_peaks()
-//   - lit depuis g_prn_var[0] (1 seule variante pour le coarse, comme l'original)
-//   - accumulateurs persistants entre les 8 passes (même logique STSA)
 static void coarse_pilot(
     const sample_t signal[N],
     const sample_t prn_raw[N],
@@ -244,15 +180,11 @@ static void coarse_pilot(
 ) {
 #pragma HLS INLINE off
 
-    // Accumulateurs persistants sur NB_DOPPLER_COARSE × NB_PHASES.
-    // Beaucoup plus petits que accI_grid[41][1023] du code original
-    // car on traite 1 Doppler à la fois (pas besoin de la dimension Doppler).
     acc_t accI_d[NB_PHASES];
     acc_t accQ_d[NB_PHASES];
 #pragma HLS BIND_STORAGE variable=accI_d type=ram_2p impl=bram
 #pragma HLS BIND_STORAGE variable=accQ_d type=ram_2p impl=bram
 
-    // Buffer de mix pour le sous-ensemble courant.
     sample_t mix_i[N / PRECISION + 1];
     sample_t mix_q[N / PRECISION + 1];
     int      mix_n[N / PRECISION + 1];
@@ -263,34 +195,29 @@ static void coarse_pilot(
     int global_best_d = 0;
     int global_best_tau = 0;
 
-    // Même logique de variance que l'original (Seuil SEUIL_VARIANCE_COARSE).
     metric_t sum_var = 0;
     int n_var_samples = 0;
 
     hls::stream<corr_pkt_unified_t> pow_s;
 #pragma HLS STREAM variable=pow_s depth=256
 
-    // Boucle externe sur les bins Doppler (pilote).
     COARSE_DOPPLER_PILOT: for (int d = 0; d < NB_DOPPLER_COARSE; d++) {
 #pragma HLS LOOP_TRIPCOUNT min=41 max=41
         doppler_t fd = doppler_offsets[d];
         dds_phase_t phase_inc = hz_to_phase_inc(fd);
 
-        // Réinitialisation des accumulateurs pour ce Doppler.
         INIT_ACC: for (int t = 0; t < NB_PHASES; t++) {
 #pragma HLS PIPELINE II=1
             accI_d[t] = 0;
             accQ_d[t] = 0;
         }
 
-        // 8 passes STSA (même logique que l'original).
         COARSE_PASS_PILOT: for (int pass = 0; pass < PRECISION; pass++) {
 #pragma HLS LOOP_TRIPCOUNT min=8 max=8
             int M = stsa_counts[pass];
             dds_phase_u_t phase_acc  = (dds_phase_u_t)((long long)phase_inc * pass);
             dds_phase_u_t phase_step = (dds_phase_u_t)((long long)phase_inc * PRECISION);
 
-            // Mélange DDS du sous-ensemble courant.
             MIX_COARSE_PILOT: for (int i = 0; i < M; i++) {
 #pragma HLS PIPELINE II=1
                 int n = stsa_indices[pass][i];
@@ -304,18 +231,16 @@ static void coarse_pilot(
                 phase_acc = (dds_phase_u_t)(phase_acc + phase_step);
             }
 
-            // Circuit fixe : corrélation sur tous les tau, avec accumulation.
             unified_corr_one_doppler(
                 mix_i, mix_q, M, mix_n,
                 0, NB_PHASES,
-                0,          // variante nominale uniquement pour le coarse
+                0,
                 fd,
                 accI_d, accQ_d,
-                true,       // accumulate = true (multi-passes STSA)
+                true,
                 pow_s
             );
 
-            // Drain de pow_s après la dernière passe pour cette freq Doppler.
             if (pass == PRECISION - 1) {
                 DRAIN_COARSE: for (int t = 0; t < NB_PHASES; t++) {
 #pragma HLS PIPELINE II=1
@@ -327,7 +252,6 @@ static void coarse_pilot(
                     }
                 }
             } else {
-                // Drain les paquets intermédiaires sans les exploiter.
                 DRAIN_INTER: for (int t = 0; t < NB_PHASES; t++) {
 #pragma HLS PIPELINE II=1
                     (void)pow_s.read();
@@ -343,9 +267,6 @@ static void coarse_pilot(
     coarse_detected  = (global_best > (peak_power_t)0);
 }
 
-// ============================================================
-// CIRCUIT PILOTE FINE — orchestre le moteur pour la fine search
-// ============================================================
 static void fine_pilot(
     const sample_t signal[N],
     int coarse_doppler,
@@ -370,7 +291,6 @@ static void fine_pilot(
 #pragma HLS BIND_STORAGE variable=mix_i type=ram_1p impl=bram latency=2
 #pragma HLS BIND_STORAGE variable=mix_q type=ram_1p impl=bram latency=2
 
-    // Accumulateurs fine (pas de persistance entre passes — 1 seule passe/bin Doppler).
     acc_t accI_dummy[NB_PHASES];
     acc_t accQ_dummy[NB_PHASES];
 
@@ -384,14 +304,12 @@ static void fine_pilot(
     peak_power_t sum_power = 0;
     int n_pkts = 0;
 
-    // Boucle fine Doppler × 3 variantes (pilote).
     FINE_DOPPLER_PILOT: for (int d = 0; d < fine_doppler_count; d++) {
 #pragma HLS LOOP_TRIPCOUNT min=7 max=21
         doppler_t fd = doppler_offsets_fine[d];
         dds_phase_t phase_inc = hz_to_phase_inc(fd);
         dds_phase_u_t phase_acc = 0;
 
-        // Mélange DDS sur N échantillons complets (fine, séquentiel).
         MIX_FINE_PILOT: for (int n = 0; n < N; n++) {
 #pragma HLS PIPELINE II=1
             unsigned lut_idx = dds_lut_index(phase_acc);
@@ -404,7 +322,6 @@ static void fine_pilot(
             phase_acc = (dds_phase_u_t)(phase_acc + (dds_phase_u_t)phase_inc);
         }
 
-        // Circuit fixe appelé 3 fois (une par variante PRN).
         FINE_VARIANT_PILOT: for (int v = 0; v < PRN_VARIANTS; v++) {
 #pragma HLS LOOP_TRIPCOUNT min=3 max=3
             unified_corr_one_doppler(
@@ -413,11 +330,10 @@ static void fine_pilot(
                 v,
                 fd,
                 accI_dummy, accQ_dummy,
-                false,      // accumulate = false (pas de multi-passes en fine)
+                false,
                 pow_s
             );
 
-            // Drain et mise à jour du meilleur pic.
             DRAIN_FINE: for (int t = 0; t < fine_tau_count; t++) {
 #pragma HLS PIPELINE II=1
                 corr_pkt_unified_t pkt = pow_s.read();
@@ -429,7 +345,6 @@ static void fine_pilot(
                     global_best_tau = pkt.tau;
                     global_best_var = pkt.variant;
                 }
-                // Emission vers corr_out (AXI-Stream, compatible notebook PYNQ).
                 axis_t out_pkt;
                 out_pkt.data = (int32_t)((double)pkt.power);
                 out_pkt.keep = -1;
@@ -450,9 +365,6 @@ static void fine_pilot(
     mean_power_out   = (n_pkts > 0) ? (int)((double)sum_power / n_pkts) : 0;
 }
 
-// ============================================================
-// PIPELINE PRINCIPAL UNIFIÉ
-// ============================================================
 static void acquisition_unified(
     hls::stream<axis_t> &rx_stream,
     hls::stream<axis_t> &prn_stream,
@@ -468,7 +380,6 @@ static void acquisition_unified(
 ) {
 #pragma HLS INLINE off
 
-    // Capture des entrées (identique à l'original).
     sample_t signal[N];
     sample_t prn_raw[N];
 #pragma HLS BIND_STORAGE variable=signal  type=ram_1p impl=bram
@@ -482,11 +393,10 @@ static void acquisition_unified(
         prn_raw[i] = (sample_t)prn_val.data;
     }
 
-    // Initialisation des tables partagées (1 seule fois par acquisition).
+
     init_prn_var(prn_raw);
     init_tau_start_tbl();
 
-    // Tables STSA pour le coarse (identiques à l'original).
     int stsa_indices[PRECISION][N / PRECISION + 1];
     int stsa_counts[PRECISION];
     int shifts[NB_PHASES];
@@ -494,7 +404,6 @@ static void acquisition_unified(
 #pragma HLS BIND_STORAGE variable=stsa_indices type=ram_2p impl=bram
 #pragma HLS BIND_STORAGE variable=shifts       type=ram_1p impl=bram
 
-    // Construction STSA (identique à build_stsa_indices / build_shifts original).
     BUILD_STSA: for (int pass = 0; pass < PRECISION; pass++) {
 #pragma HLS LOOP_TRIPCOUNT min=8 max=8
         int count = 0;
@@ -513,7 +422,6 @@ static void acquisition_unified(
         doppler_offsets_coarse[d] = (doppler_t)offset;
     }
 
-    // --- ÉTAPE 1 : COARSE PILOT ---
     int coarse_doppler = 0, coarse_phase = 0;
     peak_power_t coarse_peak = 0;
     metric_t coarse_var = 0;
@@ -538,8 +446,6 @@ static void acquisition_unified(
         return;
     }
 
-    // --- ÉTAPE 2 : FINE PILOT ---
-    // Construction de la grille fine autour du pic coarse.
     doppler_t doppler_offsets_fine[NB_DOPPLER_FINE];
     int fine_tau_begin = 0, fine_tau_count = NB_PHASES;
     int fine_doppler_count = NB_DOPPLER_FINE;
@@ -574,10 +480,6 @@ static void acquisition_unified(
     }
 }
 
-// ============================================================
-// TOP-LEVEL (même interface AXI que l'original pour compatibilité
-// avec le notebook PYNQ existant, sans modifier le bitstream wrapper)
-// ============================================================
 void acquisition_stsa_top(
     hls::stream<axis_t> &rx_stream,
     hls::stream<axis_t> &prn_stream,
